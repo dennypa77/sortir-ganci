@@ -1,0 +1,14 @@
+# Virtual Environment
+.venv/
+
+# Caches
+__pycache__/
+*.pyc
+
+# Data and Output
+Output/
+*.xlsx
+
+# Credentials and sensitive files
+ganci-sortir-*.json
+
