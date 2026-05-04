@@ -98,7 +98,7 @@ class StasiunSortirApp(ctk.CTk):
         self.configure(fg_color=COLOR_BG)
 
         # State utama
-        self.state: SortirState = SortirState()
+        self.session: SortirState = SortirState()
         self.tile_widgets: dict = {}  # slot_number → frame widget di grid
 
         self._build_ui()
@@ -319,7 +319,7 @@ class StasiunSortirApp(ctk.CTk):
             SortirState.clear()
             return
 
-        self.state = prev
+        self.session = prev
         self._refresh_all_ui()
         self.scan_entry.configure(state="normal")
         self.scan_entry.focus_set()
@@ -332,16 +332,16 @@ class StasiunSortirApp(ctk.CTk):
     # Mode toggle
     # ==================================================================
     def _toggle_mode(self) -> None:
-        if not self.state.demand:
+        if not self.session.demand:
             messagebox.showinfo("Belum siap", "Load pesanan dulu sebelum ganti mode.")
             return
-        self.state.mode = "sort" if self.state.mode == "setup" else "setup"
+        self.session.mode = "sort" if self.session.mode == "setup" else "setup"
         self._apply_mode_ui()
-        self.state.save()
+        self.session.save()
         self.scan_entry.focus_set()
 
     def _apply_mode_ui(self) -> None:
-        if self.state.mode == "setup":
+        if self.session.mode == "setup":
             self.btn_mode.configure(text="📋  Mode: Setup Slot", fg_color=COLOR_ACTIVE)
             self.scan_label.configure(text="📋  Scan stiker resi:", text_color=COLOR_ACTIVE)
             self.scan_entry.configure(border_color=COLOR_ACTIVE)
@@ -407,8 +407,8 @@ class StasiunSortirApp(ctk.CTk):
 
         def _apply():
             new_state = build_initial_state(path_pesanan, demand, summary)
-            self.state = new_state
-            self.state.save()
+            self.session = new_state
+            self.session.save()
             self._refresh_all_ui()
             self.scan_entry.configure(state="normal")
             self.scan_entry.focus_set()
@@ -440,7 +440,7 @@ class StasiunSortirApp(ctk.CTk):
     # Reset
     # ==================================================================
     def _reset(self) -> None:
-        if not self.state.demand:
+        if not self.session.demand:
             return
         if not messagebox.askyesno(
             "Reset stasiun",
@@ -453,7 +453,7 @@ class StasiunSortirApp(ctk.CTk):
         path_database = cfg.get("file_database", "")
         SortirState.clear()
         if not (path_pesanan and os.path.exists(path_pesanan)):
-            self.state = SortirState()
+            self.session = SortirState()
             self._reset_ui_idle()
             return
         self._set_idle_message("⏳  Memuat ulang...", COLOR_DIM)
@@ -469,14 +469,14 @@ class StasiunSortirApp(ctk.CTk):
     def _on_scan(self, _event=None) -> None:
         raw = self.scan_var.get().strip()
         self.scan_var.set("")
-        if not raw or not self.state.demand:
+        if not raw or not self.session.demand:
             return
 
-        if self.state.mode == "setup":
+        if self.session.mode == "setup":
             self._handle_setup_scan(raw)
         else:
             self._handle_sort_scan(raw)
-        self.state.save()
+        self.session.save()
 
     # ──────── SETUP MODE ────────
     def _handle_setup_scan(self, raw: str) -> None:
@@ -496,14 +496,14 @@ class StasiunSortirApp(ctk.CTk):
             self._add_history("setup_unknown", raw, "", None)
             return
 
-        existing_slot = self.state.slot_of(target)
+        existing_slot = self.session.slot_of(target)
         if existing_slot is not None:
             self._render_setup_existing(target, existing_slot)
             _beep("overflow")
             self._add_history("setup_dup", target, target, existing_slot)
             return
 
-        slot = self.state.assign_slot(target)
+        slot = self.session.assign_slot(target)
         self._render_setup_assign(target, slot)
         _beep("register")
         self._add_history("setup_new", "", target, slot)
@@ -515,7 +515,7 @@ class StasiunSortirApp(ctk.CTk):
         s = scanned.strip().upper()
         if not s:
             return ""
-        for r in self.state.resi_summary.keys():
+        for r in self.session.resi_summary.keys():
             if r.upper() == s:
                 return r
         return ""
@@ -529,19 +529,19 @@ class StasiunSortirApp(ctk.CTk):
             self._add_history("sort_unknown", raw, "", None)
             return
 
-        entries = self.state.demand[full_sku]
+        entries = self.session.demand[full_sku]
         # Filter ke entry yang resinya SUDAH ter-register; resi yang belum
         # punya slot di-block sampai operator setup dulu.
         available = next(
             (e for e in entries
-             if e['remaining'] > 0 and e['resi'] in self.state.slot_map),
+             if e['remaining'] > 0 and e['resi'] in self.session.slot_map),
             None,
         )
         if available is None:
             # Cek apakah masih ada resi yang butuh tapi belum register.
             unregistered = [
                 e['resi'] for e in entries
-                if e['remaining'] > 0 and e['resi'] not in self.state.slot_map
+                if e['remaining'] > 0 and e['resi'] not in self.session.slot_map
             ]
             if unregistered:
                 self._render_unregistered(full_sku, unregistered[0])
@@ -556,11 +556,11 @@ class StasiunSortirApp(ctk.CTk):
 
         # Match: alokasikan ke resi (FCFS — first entry with remaining > 0).
         available["remaining"] -= 1
-        self.state.scanned_count += 1
+        self.session.scanned_count += 1
         resi = available["resi"]
-        slot = self.state.slot_map[resi]
-        sisa_di_resi = self.state.decrement_resi(resi)
-        sudah_total, total_total = self.state.progress_of(resi)
+        slot = self.session.slot_map[resi]
+        sisa_di_resi = self.session.decrement_resi(resi)
+        sudah_total, total_total = self.session.progress_of(resi)
 
         self._render_match(slot, resi, full_sku, sudah_total, total_total)
         _beep("match")
@@ -585,10 +585,10 @@ class StasiunSortirApp(ctk.CTk):
         add(pad_sku_unit(alias_atm_anm(scanned)))
 
         for c in candidates:
-            if c in self.state.demand:
+            if c in self.session.demand:
                 return c
         cnorms = {normalize_sku(c) for c in candidates if c}
-        for key in self.state.demand:
+        for key in self.session.demand:
             if normalize_sku(key) in cnorms:
                 return key
         return ""
@@ -658,7 +658,7 @@ class StasiunSortirApp(ctk.CTk):
         )
         self.result_big_label.configure(text=str(slot), text_color=COLOR_OK)
         self.result_resi_label.configure(text=f"Resi : {resi}", text_color=COLOR_TEXT)
-        info = self.state.resi_summary.get(resi, {})
+        info = self.session.resi_summary.get(resi, {})
         self.result_sku_label.configure(
             text=f"Total charm di slot ini: {info.get('total_charm', 0)}",
             text_color=COLOR_DIM,
@@ -693,10 +693,10 @@ class StasiunSortirApp(ctk.CTk):
         self.result_big_label.configure(text="—", text_color=COLOR_IDLE)
         self.result_resi_label.configure(text="", text_color=COLOR_TEXT)
         self.result_sku_label.configure(
-            text=(f"{len(self.state.demand)} SKU unik · "
-                  f"{len(self.state.resi_summary)} resi · "
-                  f"{self.state.total_charm} charm"
-                  if self.state.demand else ""),
+            text=(f"{len(self.session.demand)} SKU unik · "
+                  f"{len(self.session.resi_summary)} resi · "
+                  f"{self.session.total_charm} charm"
+                  if self.session.demand else ""),
             text_color=COLOR_DIM,
         )
         self.result_sisa_label.configure(text="", text_color=COLOR_DIM)
@@ -705,36 +705,36 @@ class StasiunSortirApp(ctk.CTk):
     # Status & history
     # ==================================================================
     def _refresh_status(self):
-        n_setup = len(self.state.slot_map)
-        n_total_resi = len(self.state.resi_summary)
+        n_setup = len(self.session.slot_map)
+        n_total_resi = len(self.session.resi_summary)
         n_complete = sum(
-            1 for r in self.state.slot_map
-            if self.state.is_resi_complete(r)
+            1 for r in self.session.slot_map
+            if self.session.is_resi_complete(r)
         )
-        n_archived = len(self.state.archived_resi)
+        n_archived = len(self.session.archived_resi)
 
         self.lbl_setup.configure(text=f"Setup: {n_setup}/{n_total_resi} resi")
         self.lbl_charm.configure(
-            text=f"Charm: {self.state.scanned_count}/{self.state.total_charm}"
+            text=f"Charm: {self.session.scanned_count}/{self.session.total_charm}"
         )
         self.lbl_complete.configure(text=f"Resi Lengkap: {n_complete}")
         self.lbl_archive.configure(text=f"Sudah Diambil: {n_archived}")
 
-        if self.state.total_charm > 0:
-            self.progress.set(self.state.scanned_count / self.state.total_charm)
+        if self.session.total_charm > 0:
+            self.progress.set(self.session.scanned_count / self.session.total_charm)
         else:
             self.progress.set(0)
 
     def _add_history(self, kind: str, sku_or_raw: str, resi: str, slot):
-        self.state.history.append({
+        self.session.history.append({
             "time": datetime.now().strftime("%H:%M:%S"),
             "kind": kind,
             "sku":  sku_or_raw,
             "resi": resi,
             "slot": slot,
         })
-        if len(self.state.history) > self.state.history_limit:
-            self.state.history = self.state.history[-self.state.history_limit:]
+        if len(self.session.history) > self.session.history_limit:
+            self.session.history = self.session.history[-self.session.history_limit:]
         self._render_history()
 
     def _render_history(self):
@@ -751,7 +751,7 @@ class StasiunSortirApp(ctk.CTk):
         }
         self.history_box.configure(state="normal")
         self.history_box.delete("1.0", "end")
-        recent = self.state.history[-HISTORY_DISPLAY:]
+        recent = self.session.history[-HISTORY_DISPLAY:]
         for h in reversed(recent):
             sym, _color = labels.get(h["kind"], ("·", COLOR_DIM))
             slot_str = f"slot {h['slot']:>3d}" if isinstance(h["slot"], int) else "—".ljust(8)
@@ -775,8 +775,8 @@ class StasiunSortirApp(ctk.CTk):
         self.tile_widgets.clear()
 
         # Buat ulang tile sesuai slot_map
-        for slot in self.state.all_known_slots():
-            resi = self.state.resi_at_slot(slot)
+        for slot in self.session.all_known_slots():
+            resi = self.session.resi_at_slot(slot)
             self._add_or_update_tile(slot, resi)
 
         self._refresh_status()
@@ -796,12 +796,12 @@ class StasiunSortirApp(ctk.CTk):
         if resi is None:
             status, fg = "idle", COLOR_IDLE
             sub_text = "(kosong)"
-        elif self.state.is_resi_complete(resi):
+        elif self.session.is_resi_complete(resi):
             status, fg = "complete", COLOR_OK
             sub_text = "✓ LENGKAP — klik untuk ambil"
         else:
             status, fg = "active", COLOR_ACTIVE
-            sudah, total = self.state.progress_of(resi)
+            sudah, total = self.session.progress_of(resi)
             sub_text = f"{sudah}/{total} charm"
 
         # Recreate kalau belum ada widget atau status berubah
@@ -875,13 +875,13 @@ class StasiunSortirApp(ctk.CTk):
 
     def _maybe_release_slot(self, slot: int) -> None:
         """Kosongkan slot kalau sudah complete (klik handler dari tile)."""
-        resi = self.state.resi_at_slot(slot)
+        resi = self.session.resi_at_slot(slot)
         if resi is None:
             return  # slot kosong/idle — nothing to do
 
-        is_complete = self.state.is_resi_complete(resi)
+        is_complete = self.session.is_resi_complete(resi)
         if not is_complete:
-            sudah, total = self.state.progress_of(resi)
+            sudah, total = self.session.progress_of(resi)
             messagebox.showinfo(
                 "Slot belum lengkap",
                 f"Resi {resi} di slot {slot} baru {sudah}/{total} charm.\n\n"
@@ -898,7 +898,7 @@ class StasiunSortirApp(ctk.CTk):
         ):
             return
 
-        released_resi = self.state.release_slot(slot)
+        released_resi = self.session.release_slot(slot)
         if released_resi is None:
             return
         # Update tile menjadi idle
@@ -906,7 +906,7 @@ class StasiunSortirApp(ctk.CTk):
         _beep("release")
         self._add_history("release", "", released_resi, slot)
         self._refresh_status()
-        self.state.save()
+        self.session.save()
 
 
 # ──────────────────────────────────────────────────────────────────
