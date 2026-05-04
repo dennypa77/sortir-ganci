@@ -185,78 +185,94 @@ class StasiunSortirApp(ctk.CTk):
         self.scan_entry.bind("<Escape>", lambda e: self.scan_var.set(""))
         self.scan_entry.configure(state="disabled")
 
-        # Body — 2 kolom: result besar (kiri) + grid slot (kanan)
-        body = ctk.CTkFrame(self, fg_color=COLOR_BG)
-        body.pack(fill="both", expand=True, padx=24, pady=8)
+        # Result strip — kompak horizontal: nomor slot + info ringkas.
+        # Drop charm panel sengaja KECIL supaya slot grid (di bawah) bisa
+        # jadi area utama yang dilihat packer.
+        result_card = ctk.CTkFrame(self, fg_color=COLOR_PANEL, corner_radius=10)
+        result_card.pack(fill="x", padx=24, pady=8)
+        result_inner = ctk.CTkFrame(result_card, fg_color=COLOR_PANEL)
+        result_inner.pack(fill="x", padx=14, pady=10)
 
-        # Kiri: result panel
-        result_card = ctk.CTkFrame(body, fg_color=COLOR_PANEL, corner_radius=10)
-        result_card.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        # Kotak nomor slot — kecil di kiri (lebar tetap, font 56pt)
+        slot_box = ctk.CTkFrame(
+            result_inner, fg_color=COLOR_IDLE, corner_radius=10,
+            width=130, height=110,
+        )
+        slot_box.pack(side="left")
+        slot_box.pack_propagate(False)
+        self.result_big_label = ctk.CTkLabel(
+            slot_box, text="—",
+            font=("Segoe UI", 56, "bold"), text_color="white",
+        )
+        self.result_big_label.pack(expand=True)
+        self._result_slot_box = slot_box  # untuk ubah warna background
+
+        # Info di kanan — stack vertikal (kind, resi, sku, sisa)
+        info = ctk.CTkFrame(result_inner, fg_color=COLOR_PANEL)
+        info.pack(side="left", fill="both", expand=True, padx=(16, 0))
 
         self.result_kind_label = ctk.CTkLabel(
-            result_card, text="BELUM LOAD PESANAN",
-            font=("Segoe UI", 16, "bold"), text_color=COLOR_DIM,
+            info, text="BELUM LOAD PESANAN",
+            font=("Segoe UI", 14, "bold"), text_color=COLOR_DIM,
+            anchor="w",
         )
-        self.result_kind_label.pack(pady=(20, 6))
-
-        self.result_big_label = ctk.CTkLabel(
-            result_card, text="—",
-            font=("Segoe UI", 130, "bold"), text_color=COLOR_IDLE,
-        )
-        self.result_big_label.pack(pady=(4, 4))
+        self.result_kind_label.pack(fill="x", pady=(0, 4))
 
         self.result_resi_label = ctk.CTkLabel(
-            result_card, text="",
-            font=("Consolas", 16, "bold"), text_color=COLOR_TEXT,
+            info, text="", font=("Consolas", 13, "bold"),
+            text_color=COLOR_TEXT, anchor="w",
         )
-        self.result_resi_label.pack(pady=(4, 2))
+        self.result_resi_label.pack(fill="x", pady=(0, 2))
 
         self.result_sku_label = ctk.CTkLabel(
-            result_card, text="",
-            font=("Consolas", 13), text_color=COLOR_DIM,
+            info, text="", font=("Consolas", 11),
+            text_color=COLOR_DIM, anchor="w",
         )
-        self.result_sku_label.pack(pady=(0, 2))
+        self.result_sku_label.pack(fill="x", pady=(0, 2))
 
         self.result_sisa_label = ctk.CTkLabel(
-            result_card, text="",
-            font=("Segoe UI", 12, "italic"), text_color=COLOR_DIM,
+            info, text="", font=("Segoe UI", 11, "italic"),
+            text_color=COLOR_DIM, anchor="w",
         )
-        self.result_sisa_label.pack(pady=(0, 18))
+        self.result_sisa_label.pack(fill="x")
 
-        # Kanan: panel grid slot
-        right = ctk.CTkFrame(body, fg_color=COLOR_PANEL, corner_radius=10, width=440)
-        right.pack(side="right", fill="y", padx=(8, 0))
-        right.pack_propagate(False)
+        # Slot grid — area utama, mengisi sisa ruang vertikal.
+        grid_card = ctk.CTkFrame(self, fg_color=COLOR_PANEL, corner_radius=10)
+        grid_card.pack(fill="both", expand=True, padx=24, pady=(0, 8))
+
+        grid_header = ctk.CTkFrame(grid_card, fg_color=COLOR_PANEL)
+        grid_header.pack(fill="x", padx=14, pady=(10, 4))
         ctk.CTkLabel(
-            right, text="📋  Layout Slot",
-            font=("Segoe UI", 12, "bold"), text_color=COLOR_ACCENT2,
+            grid_header, text="📋  Layout Slot",
+            font=("Segoe UI", 14, "bold"), text_color=COLOR_ACCENT2,
             anchor="w",
-        ).pack(fill="x", padx=14, pady=(10, 6))
+        ).pack(side="left")
         ctk.CTkLabel(
-            right, text="Klik slot hijau (lengkap) untuk kosongkan & ambil kotak.",
-            font=("Segoe UI", 9, "italic"), text_color=COLOR_DIM,
-            anchor="w", wraplength=400, justify="left",
-        ).pack(fill="x", padx=14, pady=(0, 6))
+            grid_header,
+            text="Klik tile hijau (✓ LENGKAP) untuk kosongkan slot & ambil kotak",
+            font=("Segoe UI", 10, "italic"), text_color=COLOR_DIM,
+            anchor="e",
+        ).pack(side="right")
 
         self.slot_grid_scroll = ctk.CTkScrollableFrame(
-            right, fg_color="#1a1a2e", corner_radius=6,
+            grid_card, fg_color="#1a1a2e", corner_radius=6,
         )
         self.slot_grid_scroll.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # History panel di bawah
+        # History panel — compact di bawah
         hist_card = ctk.CTkFrame(self, fg_color=COLOR_PANEL, corner_radius=8)
-        hist_card.pack(fill="x", padx=24, pady=(0, 16))
+        hist_card.pack(fill="x", padx=24, pady=(0, 14))
         ctk.CTkLabel(
             hist_card, text="📜  Riwayat Scan (10 terakhir)",
-            font=("Segoe UI", 11, "bold"), text_color=COLOR_ACCENT2,
+            font=("Segoe UI", 10, "bold"), text_color=COLOR_ACCENT2,
             anchor="w",
-        ).pack(fill="x", padx=14, pady=(8, 4))
+        ).pack(fill="x", padx=14, pady=(6, 2))
 
         self.history_box = ctk.CTkTextbox(
-            hist_card, height=130, font=("Consolas", 11),
+            hist_card, height=95, font=("Consolas", 10),
             fg_color="#12121f", text_color=COLOR_TEXT, wrap="none",
         )
-        self.history_box.pack(fill="x", padx=14, pady=(0, 12))
+        self.history_box.pack(fill="x", padx=14, pady=(0, 8))
         self.history_box.configure(state="disabled")
 
     # ==================================================================
@@ -596,29 +612,31 @@ class StasiunSortirApp(ctk.CTk):
     # ==================================================================
     # Render BIG result
     # ==================================================================
+    def _set_slot_box(self, text: str, bg_color: str) -> None:
+        """Update kotak nomor slot di kiri result strip (warna BG + teks)."""
+        self._result_slot_box.configure(fg_color=bg_color)
+        self.result_big_label.configure(text=text, fg_color=bg_color, text_color="white")
+
     def _render_match(self, slot, resi, sku, sudah, total):
+        self._set_slot_box(str(slot) if slot is not None else "?", COLOR_OK)
         self.result_kind_label.configure(
             text="✅  DROP CHARM DI SLOT INI",
-            text_color=COLOR_OK,
-        )
-        self.result_big_label.configure(
-            text=str(slot) if slot is not None else "?",
             text_color=COLOR_OK,
         )
         self.result_resi_label.configure(text=f"Resi : {resi}", text_color=COLOR_TEXT)
         self.result_sku_label.configure(text=f"SKU  : {sku}", text_color=COLOR_DIM)
         self.result_sisa_label.configure(
             text=f"Progress slot ini: {sudah}/{total}"
-                 + ("  ✓ LENGKAP" if sudah == total else ""),
+                 + ("  ✓ LENGKAP — kotak siap diambil" if sudah == total else ""),
             text_color=COLOR_OK if sudah == total else COLOR_DIM,
         )
 
     def _render_overflow(self, sku):
+        self._set_slot_box("✕", COLOR_WARN)
         self.result_kind_label.configure(
-            text="⚠️  SUDAH LENGKAP — charm ini sisa / kelebihan",
+            text="⚠️  SUDAH LENGKAP — charm ini kelebihan",
             text_color=COLOR_WARN,
         )
-        self.result_big_label.configure(text="✕", text_color=COLOR_WARN)
         self.result_resi_label.configure(text="(simpan ke kotak sisa)", text_color=COLOR_WARN)
         self.result_sku_label.configure(text=f"SKU  : {sku}", text_color=COLOR_DIM)
         self.result_sisa_label.configure(
@@ -627,24 +645,22 @@ class StasiunSortirApp(ctk.CTk):
         )
 
     def _render_unknown(self, raw):
+        self._set_slot_box("?", COLOR_ERR)
         self.result_kind_label.configure(
             text="❌  SKU TIDAK TERDAFTAR",
             text_color=COLOR_ERR,
         )
-        self.result_big_label.configure(text="?", text_color=COLOR_ERR)
         self.result_resi_label.configure(text="(cek ulang barcode / pesanan)", text_color=COLOR_ERR)
         self.result_sku_label.configure(text=f"Discan: {raw}", text_color=COLOR_DIM)
         self.result_sisa_label.configure(text="", text_color=COLOR_DIM)
 
     def _render_unregistered(self, sku, resi):
+        self._set_slot_box("!", COLOR_WARN)
         self.result_kind_label.configure(
             text="⚠️  RESI BELUM TER-REGISTER — kembali ke Mode SETUP",
             text_color=COLOR_WARN,
         )
-        self.result_big_label.configure(text="!", text_color=COLOR_WARN)
-        self.result_resi_label.configure(
-            text=f"Resi: {resi}", text_color=COLOR_WARN,
-        )
+        self.result_resi_label.configure(text=f"Resi : {resi}", text_color=COLOR_WARN)
         self.result_sku_label.configure(text=f"SKU  : {sku}", text_color=COLOR_DIM)
         self.result_sisa_label.configure(
             text="Klik tombol Mode di header → scan stiker resi ini dulu",
@@ -652,11 +668,11 @@ class StasiunSortirApp(ctk.CTk):
         )
 
     def _render_setup_assign(self, resi, slot):
+        self._set_slot_box(str(slot), COLOR_OK)
         self.result_kind_label.configure(
             text="✅  RESI TER-REGISTER",
             text_color=COLOR_OK,
         )
-        self.result_big_label.configure(text=str(slot), text_color=COLOR_OK)
         self.result_resi_label.configure(text=f"Resi : {resi}", text_color=COLOR_TEXT)
         info = self.session.resi_summary.get(resi, {})
         self.result_sku_label.configure(
@@ -669,28 +685,28 @@ class StasiunSortirApp(ctk.CTk):
         )
 
     def _render_setup_existing(self, resi, slot):
+        self._set_slot_box(str(slot), COLOR_WARN)
         self.result_kind_label.configure(
             text="ℹ️  RESI SUDAH TER-REGISTER",
             text_color=COLOR_WARN,
         )
-        self.result_big_label.configure(text=str(slot), text_color=COLOR_WARN)
         self.result_resi_label.configure(text=f"Resi : {resi}", text_color=COLOR_TEXT)
         self.result_sku_label.configure(text="(scan duplikat)", text_color=COLOR_DIM)
         self.result_sisa_label.configure(text="", text_color=COLOR_DIM)
 
     def _render_unknown_resi(self, raw):
+        self._set_slot_box("?", COLOR_ERR)
         self.result_kind_label.configure(
             text="❌  RESI TIDAK ADA DI PESANAN HARI INI",
             text_color=COLOR_ERR,
         )
-        self.result_big_label.configure(text="?", text_color=COLOR_ERR)
         self.result_resi_label.configure(text=f"Discan: {raw}", text_color=COLOR_ERR)
         self.result_sku_label.configure(text="(cek ulang stiker / file pesanan)", text_color=COLOR_DIM)
         self.result_sisa_label.configure(text="", text_color=COLOR_DIM)
 
     def _set_idle_message(self, text: str, color: str):
+        self._set_slot_box("—", COLOR_IDLE)
         self.result_kind_label.configure(text=text, text_color=color)
-        self.result_big_label.configure(text="—", text_color=COLOR_IDLE)
         self.result_resi_label.configure(text="", text_color=COLOR_TEXT)
         self.result_sku_label.configure(
             text=(f"{len(self.session.demand)} SKU unik · "
@@ -812,36 +828,37 @@ class StasiunSortirApp(ctk.CTk):
         else:
             self._update_tile(existing, slot, fg, status, resi, sub_text)
 
+    # Grid = 5 kolom (cocok ratio modern monitor & tile lebar 170px).
+    GRID_COLS = 5
+
     def _create_tile(self, slot, fg, status, resi, sub_text):
-        # Hitung row/col berdasarkan urutan slot. Grid 6 kolom.
         all_slots = sorted(self.tile_widgets.keys() | {slot})
         idx = all_slots.index(slot)
-        row, col = divmod(idx, 6)
+        row, col = divmod(idx, self.GRID_COLS)
 
         tile = ctk.CTkFrame(
-            self.slot_grid_scroll, fg_color=fg, corner_radius=8,
-            width=120, height=80,
+            self.slot_grid_scroll, fg_color=fg, corner_radius=10,
+            width=170, height=115,
         )
-        tile.grid(row=row, column=col, padx=4, pady=4, sticky="nsew")
+        tile.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
         tile.grid_propagate(False)
 
-        # Klik untuk kosongkan (kalau complete)
         def _on_click(_e=None, slot_local=slot):
             self._maybe_release_slot(slot_local)
         tile.bind("<Button-1>", _on_click)
 
-        # Nomor slot
+        # Nomor slot — besar, prominent
         lbl_num = ctk.CTkLabel(
-            tile, text=str(slot), font=("Segoe UI", 22, "bold"),
+            tile, text=str(slot), font=("Segoe UI", 36, "bold"),
             text_color="white", fg_color=fg,
         )
-        lbl_num.pack(pady=(6, 0))
+        lbl_num.pack(pady=(8, 0))
         lbl_num.bind("<Button-1>", _on_click)
 
-        # Resi (truncated 12 chars terakhir)
-        resi_txt = (resi[-14:] if resi else "—")
+        # Resi (truncated 16 char terakhir biar muat di tile lebar)
+        resi_txt = (resi[-16:] if resi else "—")
         lbl_resi = ctk.CTkLabel(
-            tile, text=resi_txt, font=("Consolas", 9),
+            tile, text=resi_txt, font=("Consolas", 10, "bold"),
             text_color="white", fg_color=fg,
         )
         lbl_resi.pack()
@@ -849,13 +866,12 @@ class StasiunSortirApp(ctk.CTk):
 
         # Sub text (progress / status)
         lbl_sub = ctk.CTkLabel(
-            tile, text=sub_text, font=("Segoe UI", 9, "italic"),
+            tile, text=sub_text, font=("Segoe UI", 10, "italic"),
             text_color="white", fg_color=fg,
         )
-        lbl_sub.pack(pady=(0, 6))
+        lbl_sub.pack(pady=(0, 8))
         lbl_sub.bind("<Button-1>", _on_click)
 
-        # Simpan referensi label utk update
         tile._lbl_num = lbl_num
         tile._lbl_resi = lbl_resi
         tile._lbl_sub = lbl_sub
