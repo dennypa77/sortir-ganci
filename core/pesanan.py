@@ -12,8 +12,11 @@ Output utama :func:`load_pesanan_demand`:
 
 * ``demand[full_sku] = [{resi, sku_pesanan_asli, remaining}, …]``
 * ``resi_summary[resi] = {total_charm, sku_breakdown: {full_sku: qty}}``
-* ``slot_map[resi] = nomor_slot``                  (auto-sequential 1..N)
 * ``skipped`` daftar baris di-skip + alasan
+
+Slot assignment **tidak** dihasilkan di sini — slot ditentukan oleh
+operator lewat Setup mode di stasiun_sortir (scan stiker resi → assign
+slot berikutnya). Lihat :mod:`core.state` untuk slot management.
 
 CUSTOM SKU di-skip karena tidak punya barcode generic (operator pakai
 desain custom secara manual, di luar workflow scan).
@@ -36,7 +39,7 @@ from core.sku_utils import (
 def load_pesanan_demand(
     file_pesanan: str,
     file_database: str = '',
-) -> Tuple[Dict[str, List[dict]], Dict[str, dict], Dict[str, int], List[str]]:
+) -> Tuple[Dict[str, List[dict]], Dict[str, dict], List[str]]:
     """
     Baca pesanan + database SKU → demand map untuk stasiun sortir.
 
@@ -48,8 +51,9 @@ def load_pesanan_demand(
             ``skipped``); bundle SET dgn range numerik tetap bisa.
 
     Returns:
-        Tuple ``(demand, resi_summary, slot_map, skipped)``. Lihat docstring
-        modul untuk struktur masing-masing.
+        Tuple ``(demand, resi_summary, skipped)``. Lihat docstring modul
+        untuk struktur masing-masing. Slot assignment dilakukan di luar
+        sini (lihat :mod:`core.state`).
 
     Raises:
         FileNotFoundError jika ``file_pesanan`` tidak ada (file_database
@@ -128,11 +132,7 @@ def load_pesanan_demand(
         for r, info in resi_summary.items()
     }
 
-    # Slot auto-sequential berurutan sesuai resi yg muncul (sorted) — packer
-    # bisa baca label slot di rak fisik.
-    slot_map = {resi: i for i, resi in enumerate(sorted(resi_summary_clean.keys()), start=1)}
-
-    return dict(demand), resi_summary_clean, slot_map, skipped
+    return dict(demand), resi_summary_clean, skipped
 
 
 def total_charm_outstanding(demand: Dict[str, List[dict]]) -> int:

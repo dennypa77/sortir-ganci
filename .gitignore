@@ -18,3 +18,7 @@ user_config.json
 # Auto-update one-shot flag yang dikonsumsi GUI saat startup
 .last_update.json
 
+# Stasiun Sortir per-session state (slot map, scan progress, history)
+.scan_state.json
+.scan_state.json.tmp
+
