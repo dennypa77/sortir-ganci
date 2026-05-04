@@ -12,3 +12,9 @@ Output/
 # Credentials and sensitive files
 ganci-sortir-*.json
 
+# Per-machine settings (path lokal). config.json adalah template tracked.
+user_config.json
+
+# Auto-update one-shot flag yang dikonsumsi GUI saat startup
+.last_update.json
+

@@ -10,6 +10,25 @@ from tkinter import ttk, messagebox, scrolledtext, filedialog
 import threading
 from collections import defaultdict
 
+# ── Utilitas SKU di-share dengan stasiun_sortir.py ──────────────────────────
+from core.sku_utils import (
+    ATURAN_BUNDLE,
+    parse_dynamic_sku,
+    normalize_sku,
+    to_ultra_short_sku,
+    pad_sku_unit,
+    resolve_bundle,
+)
+from core.version import get_version
+from core.updater import consume_update_flag
+from core.config import (
+    load_config,
+    save_config,
+    DEFAULT_CONFIG,
+    TEMPLATE_CONFIG,
+    USER_CONFIG_FILE,
+)
+
 # ── Google Sheets (opsional, install: pip install gspread google-auth) ──────
 try:
     import gspread
@@ -18,53 +37,28 @@ try:
 except ImportError:
     GSPREAD_AVAILABLE = False
 
-# --- ATURAN BUNDLE (tidak berubah) ---
-ATURAN_BUNDLE = {
-    'S': 5,
-    'M': 5,
-    'BS': 10,
-}
+# Config loading di-share dengan stasiun_sortir.py via core.config (lihat di-import).
 
-# --- CONFIG (disimpan otomatis ke config.json) ---
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
-DEFAULT_CONFIG = {
-    'file_pesanan':    'pesanan_harian.xlsx',
-    'file_database':   'database_sku.xlsx',
-    'folder_master':   '',
-    'folder_output':   '',
-    'spreadsheet_id':  '',       # ID Google Sheets (dari URL)
-    'json_key_path':   '',       # Path ke file JSON Service Account
-}
-
-def load_config():
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            # merge supaya key baru dari DEFAULT_CONFIG tetap ada
-            return {**DEFAULT_CONFIG, **data}
-        except Exception:
-            pass
-    return DEFAULT_CONFIG.copy()
-
-def save_config(cfg: dict):
-    try:
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(cfg, f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
-
-def build_file_index(folder_akar, log_callback):
+def build_file_index(folder_akar, log_callback, status_callback=None):
     """
     Scan folder master 1x saja, simpan semua file ke dict.
     Index juga menyimpan alias ATM <-> ANM agar pencarian tetap
     berhasil meski nama file di folder berbeda dengan format pesanan.
     """
     log_callback("🔍 Membangun index file dari Folder Master Desain...")
+    if status_callback:
+        status_callback("🔍 Memulai indexing file master...")
+        
     t0 = time.perf_counter()
     index = {}
+    count_files = 0
+    
     for root, dirs, files in os.walk(folder_akar):
         for fname in files:
+            count_files += 1
+            if count_files % 3000 == 0 and status_callback:
+                status_callback(f"🔍 Mengindeks file... ({count_files:,} file ditemukan)")
+                
             index[fname] = os.path.join(root, fname)
             # Tambah alias ATM <-> ANM supaya pencarian tidak gagal
             # karena perbedaan prefix antara file & pesanan
@@ -152,29 +146,155 @@ def sync_to_google_sheets(spreadsheet_id, json_key_path, pesanan_grouped, log_ca
         return False
 
 
-def parse_dynamic_sku(sku_bundle_dasar):
+def load_stok_database(spreadsheet_id, json_key_path, log_callback):
     """
-    Fungsi untuk membaca SKU bundle secara dinamis dari urutan angkanya.
-    Mendukung format lama (contoh: GK-ANM-SET-81-90) dan format baru (contoh: ANM-81-90).
+    Membaca tab 'DATABASE_PRODUK' dari Google Sheets SATU KALI,
+    mengembalikan dictionary {sku_master: {'stok': int, 'nama_produk': str}}
+    untuk pengecekan stok yang cepat tanpa bolak-balik panggil API.
+    Return None jika tidak dikonfigurasi atau gagal.
     """
-    pattern = r'(?:GK-)?(.*?)-(\d+)-(\d+)$'
-    match = re.search(pattern, sku_bundle_dasar, re.IGNORECASE)
-    if match:
-        kategori_mentah = match.group(1)
-        kategori = re.sub(r'-?SET-?', '', kategori_mentah, flags=re.IGNORECASE).strip('-')
-        start = int(match.group(2))
-        end = int(match.group(3))
-        
-        sku_list = []
-        for i in range(start, end + 1):
-            sku_list.append(f"GK-{kategori}-{str(i).zfill(7)}")
-        return sku_list
-    return []
+    if not GSPREAD_AVAILABLE:
+        return None
+    if not spreadsheet_id or not json_key_path:
+        return None
+    if not os.path.exists(json_key_path):
+        return None
+
+    try:
+        log_callback("\n" + "─" * 55)
+        log_callback("📦 Membaca database stok dari Google Sheets...")
+
+        SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+        creds  = GSCredentials.from_service_account_file(json_key_path, scopes=SCOPES)
+        client = gspread.authorize(creds)
+        spreadsheet = client.open_by_key(spreadsheet_id)
+
+        try:
+            ws = spreadsheet.worksheet('DATABASE_PRODUK')
+        except gspread.exceptions.WorksheetNotFound:
+            log_callback("⚠️  [Stok] Tab 'DATABASE_PRODUK' tidak ditemukan di spreadsheet.", tag="warn")
+            return None
+
+        # Baca semua nilai sekaligus (1 API call)
+        all_values = ws.get_all_values()
+        if len(all_values) < 2:
+            log_callback("⚠️  [Stok] Tab 'DATABASE_PRODUK' kosong atau hanya berisi header.", tag="warn")
+            return None
+
+        stok_dict = {}
+        header = [str(h).strip() for h in all_values[0]]
+
+        # Cari indeks kolom berdasarkan nama header (Kolom A=0, C=2, I=8)
+        # Fallback ke indeks posisi jika header tidak ditemukan
+        def col_idx(names, fallback):
+            for n in names:
+                if n in header:
+                    return header.index(n)
+            return fallback
+
+        idx_sku   = col_idx(['SKU Master', 'sku_master', 'SKU'], 0)      # Kolom A
+        idx_sku_pendek = col_idx(['SKU Pendek', 'sku_pendek'], 1)        # Kolom B
+        idx_nama  = col_idx(['Nama Produk', 'nama_produk', 'Nama'], 2)   # Kolom C
+        idx_stok  = col_idx(['Stok Saat Ini', 'stok_saat_ini', 'Stok'], 8)  # Kolom I
+
+        for row in all_values[1:]:
+            if not row:
+                continue
+            sku = str(row[idx_sku]).strip() if idx_sku < len(row) else ''
+            if not sku:
+                continue
+            sku_pendek = str(row[idx_sku_pendek]).strip() if idx_sku_pendek < len(row) else ''
+            nama = str(row[idx_nama]).strip() if idx_nama < len(row) else ''
+            stok_raw = str(row[idx_stok]).strip() if idx_stok < len(row) else '0'
+            try:
+                stok = int(float(stok_raw)) if stok_raw else 0
+            except ValueError:
+                stok = 0
+            
+            sku_norm = normalize_sku(sku)
+            data_stok = {
+                'stok': stok, 
+                'nama_produk': nama, 
+                'sku_asli': sku, 
+                'sku_pendek': sku_pendek
+            }
+            # Simpan berdasarkan format Ultra-Short sebagai target utama pencarian jika tersedia
+            if sku_pendek:
+                stok_dict[sku_pendek.upper()] = data_stok
+            # Simpan juga berdasarkan sku_norm sebagai fallback
+            stok_dict[sku_norm] = data_stok
+
+        log_callback(
+            f"✅ Database stok berhasil dimuat: {len(stok_dict):,} produk unik.",
+            tag="success"
+        )
+        log_callback("─" * 55)
+        return stok_dict
+
+    except Exception as e:
+        log_callback(f"⚠️  [Stok] Gagal membaca DATABASE_PRODUK: {repr(e)}", tag="warn")
+        return None
+
+
+def log_keluar_gudang(spreadsheet_id, json_key_path, ambil_gudang_log, log_callback):
+    """
+    Catat semua pengambilan dari gudang ke tab 'LOG_KELUAR'.
+    ambil_gudang_log: list of dict {sku_master, jumlah, nama_produk}
+    """
+    if not GSPREAD_AVAILABLE:
+        return
+    if not spreadsheet_id or not json_key_path:
+        return
+    if not ambil_gudang_log:
+        return
+    if not os.path.exists(json_key_path):
+        return
+
+    try:
+        log_callback("\n" + "─" * 55)
+        log_callback("📝 Mencatat pengambilan gudang ke LOG_KELUAR...")
+
+        SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+        creds  = GSCredentials.from_service_account_file(json_key_path, scopes=SCOPES)
+        client = gspread.authorize(creds)
+        spreadsheet = client.open_by_key(spreadsheet_id)
+
+        try:
+            ws_log = spreadsheet.worksheet('LOG_KELUAR')
+        except gspread.exceptions.WorksheetNotFound:
+            ws_log = spreadsheet.add_worksheet(title='LOG_KELUAR', rows=1000, cols=5)
+            ws_log.append_row(
+                ['Tanggal', 'SKU Pendek', 'SKU Master', 'Jumlah Keluar', 'Keterangan'],
+                value_input_option='USER_ENTERED'
+            )
+            log_callback("📝 Tab 'LOG_KELUAR' baru berhasil dibuat.")
+
+        tanggal = datetime.now().strftime('%Y-%m-%d')
+        rows = []
+        for item in ambil_gudang_log:
+            rows.append([
+                tanggal,
+                item.get('sku_pendek', ''),
+                None,  # Gunakan None kembali agar Google Sheets TIDAK menimpa ARRAYFORMULA Anda!
+                item['jumlah'],
+                'Ambil dari Gudang'
+            ])
+
+        ws_log.append_rows(rows, value_input_option='USER_ENTERED')
+        log_callback(
+            f"✅ {len(rows)} baris log gudang berhasil dicatat ke LOG_KELUAR.",
+            tag="success"
+        )
+
+    except Exception as e:
+        log_callback(f"⚠️  [LOG_KELUAR] Gagal mencatat log gudang: {repr(e)}", tag="warn")
+
 
 def proses_data(file_pesanan, file_database, folder_master_desain, folder_output,
                 log_callback, progress_callback, finish_callback,
                 status_callback=None, cloud_warn_callback=None,
-                spreadsheet_id='', json_key_path='', mode=1):
+                spreadsheet_id='', json_key_path='', mode=1,
+                cek_stok_aktif=True, gudang_log_callback=None):
     """
     mode=1 : Layout Masal — semua file dalam 1 folder flat, tidak ada subfolder bundle.
     mode=2 : Sortir per Resi — file dikelompokkan dalam subfolder per nomor resi.
@@ -233,7 +353,18 @@ def proses_data(file_pesanan, file_database, folder_master_desain, folder_output
         return
 
     # ── Bangun index file 1x saja ──────────────────────────────
-    file_index = build_file_index(folder_master_desain, log_callback)
+    file_index = build_file_index(folder_master_desain, log_callback, status_callback)
+
+    # ── Baca database stok dari Google Sheets 1x saja ──────────
+    set_status("📦  Membaca database stok gudang...")
+    stok_db = {}
+    if cek_stok_aktif and spreadsheet_id and json_key_path:
+        stok_db = load_stok_database(spreadsheet_id, json_key_path, log_callback) or {}
+    elif not spreadsheet_id or not json_key_path:
+        pass  # Belum dikonfigurasi, skip pengecekan stok
+
+    # Akumulasi log pengambilan dari gudang
+    ambil_gudang_log = []  # list of {sku_master, jumlah, nama_produk}
 
     # =========================================================
     # FIX BUG: Gabungkan baris dengan Resi + SKU yang SAMA
@@ -248,20 +379,8 @@ def proses_data(file_pesanan, file_database, folder_master_desain, folder_output
             resi = str(row['resi']).strip()
             sku_pesanan = str(row['sku']).strip()
             
-            # --- Normalisasi Format SKU ---
-            # 1. Ganti typo ATM ke ANM
-            sku_pesanan = sku_pesanan.replace('ATM-', 'ANM-')
-
-            # 2. Pad angka jadi 7 digit HANYA untuk SKU tunggal: GK-ANM-487-L → GK-ANM-0000487-L
-            #    Jangan pad format bundle/SET seperti: GK-ANM-SET-3851-3860-BS
-            #    Cara aman: split per '-', jika part[-2] adalah angka pendek DAN part[-3] BUKAN angka → pad
-            _parts = sku_pesanan.split('-')
-            if len(_parts) >= 3 and _parts[-1].upper() in ['L', 'S', 'M', 'BS']:
-                _angka = _parts[-2]
-                _prev  = _parts[-3] if len(_parts) >= 4 else ''
-                if _angka.isdigit() and len(_angka) < 7 and not _prev.isdigit():
-                    _parts[-2] = _angka.zfill(7)
-                    sku_pesanan = '-'.join(_parts)
+            # Pad SKU tunggal -L/-S/-M/-BS jadi 7 digit (lihat core.sku_utils.pad_sku_unit).
+            sku_pesanan = pad_sku_unit(sku_pesanan)
 
             jumlah = int(row['jumlah'])
             ukuran = sku_pesanan.split('-')[-1].upper()
@@ -317,39 +436,22 @@ def proses_data(file_pesanan, file_database, folder_master_desain, folder_output
                     })
                 continue
 
-            sku_dasar_list = []
-            is_bundle = False
-            sku_bundle_dasar = sku_pesanan.rsplit('-', 1)[0]
-
-            # Cek apakah benar-benar bundle (SET) atau item S/M/BS yang ada di db bundle
-            if "-SET-" in sku_pesanan.upper():
-                is_bundle = True
-            elif ukuran in ['S', 'M', 'BS']:
-                kolom_cari = 'sku_bundling_base_bs' if ukuran == 'BS' else 'sku_bundling_base'
-                if kolom_cari in df_database.columns:
-                    filter_bundle = df_database[kolom_cari] == sku_bundle_dasar
-                    matched = df_database[filter_bundle]['sku_individu_base'].tolist()
-                    if matched:
-                        is_bundle = True
-                        sku_dasar_list = matched
-
-                # Fallback: coba parse dinamis (misal GK-ANM-SET-81-90)
-                if not is_bundle:
-                    sku_dasar_list = parse_dynamic_sku(sku_bundle_dasar)
-                    if sku_dasar_list:
-                        is_bundle = True
-                        log_callback(f"  🔍 [Dinamis] Range terdeteksi dari: {sku_bundle_dasar}")
+            # Resolusi bundle/single via core.sku_utils.resolve_bundle.
+            # Caller (di sini) tetap bertanggung jawab atas log diagnostik
+            # supaya stream log identik dengan versi inline sebelum refactor.
+            res = resolve_bundle(sku_pesanan, ukuran, df_database)
+            is_bundle = res.is_bundle
+            sku_dasar_list = list(res.sku_dasar_list)
+            sku_bundle_dasar = res.sku_bundle_dasar
 
             if is_bundle:
-                if not sku_dasar_list:
-                    # Belum terisi (dari SET path), coba database dulu
-                    kolom_cari = 'sku_bundling_base_bs' if ukuran == 'BS' else 'sku_bundling_base'
-                    if kolom_cari in df_database.columns:
-                        filter_bundle = df_database[kolom_cari] == sku_bundle_dasar
-                        sku_dasar_list = df_database[filter_bundle]['sku_individu_base'].tolist()
-                    if not sku_dasar_list:
-                        log_callback(f"  🔍 [Dinamis] Membaca range angka dari: {sku_bundle_dasar}")
-                        sku_dasar_list = parse_dynamic_sku(sku_bundle_dasar)
+                # Cabang S/M/BS yang dapat komponen via parse_dynamic_sku.
+                if res.used_dynamic and not res.matched_set_keyword:
+                    log_callback(f"  🔍 [Dinamis] Range terdeteksi dari: {sku_bundle_dasar}")
+                # Cabang SET yang melewati lookup DB (silent jika DB hit; pesan
+                # ini muncul saat DB miss → fallback ke parse_dynamic_sku).
+                elif res.matched_set_keyword and not res.used_database:
+                    log_callback(f"  🔍 [Dinamis] Membaca range angka dari: {sku_bundle_dasar}")
 
                 if not sku_dasar_list:
                     log_callback(f"  ❌ Gagal membuat resep bundle '{sku_bundle_dasar}'.", tag="error")
@@ -362,17 +464,56 @@ def proses_data(file_pesanan, file_database, folder_master_desain, folder_output
                     continue
 
                 if ukuran in ATURAN_BUNDLE:
-                    batas = ATURAN_BUNDLE[ukuran]
-                    sku_dasar_list = sku_dasar_list[:batas]
                     log_callback(f"  📐 Bundle ukuran '{ukuran}' → ambil {len(sku_dasar_list)} item.")
             else:
-                # Item tunggal — termasuk ukuran S/M/BS yang bukan bundle
-                sku_dasar = sku_bundle_dasar
-                sku_dasar_list.append(sku_dasar)
+                # Item tunggal — termasuk ukuran S/M/BS yang bukan bundle.
                 if ukuran in ['S', 'M', 'BS']:
                     log_callback(f"  🏷️  SKU Tunggal ukuran {ukuran} terdeteksi (bukan bundle).")
                 else:
                     log_callback(f"  🏷️  SKU Tunggal (-L) terdeteksi.")
+
+            # =====================================================
+            # Cek Stok Gudang per SKU Dasar (SEBELUM loop QTY)
+            # =====================================================
+            gudang_flag = {}
+            for sku_dasar in sku_dasar_list:
+                sku_master_key = f"{sku_dasar}-{ukuran}"
+                sku_norm = normalize_sku(sku_master_key)
+                ultra_short = to_ultra_short_sku(sku_master_key)
+                
+                # Cari menggunakan format Ultra-Short terlebih dahulu
+                info_stok = stok_db.get(ultra_short)
+                if info_stok is None:
+                    # Fallback ke pencarian format sku_norm
+                    info_stok = stok_db.get(sku_norm)
+                if info_stok is None:
+                    # Fallback ke pencarian tanpa ukuran (jika di DB produk tidak menyertakan '-L' dsb)
+                    info_stok = stok_db.get(normalize_sku(sku_dasar))
+
+                stok_tersedia = info_stok['stok'] if info_stok else 0
+                nama_produk   = info_stok['nama_produk'] if info_stok else ''
+                sku_asli      = info_stok['sku_asli'] if info_stok else sku_master_key
+                sku_pendek    = info_stok['sku_pendek'] if info_stok else ultra_short
+
+                # Jika stok di memori cukup untuk jumlah pesanan, kurangi & tandai ambil dari gudang
+                if stok_db and info_stok and stok_tersedia >= jumlah:
+                    gudang_flag[sku_dasar] = True
+                    info_stok['stok'] -= jumlah  # Kurangi stok memory agar tidak bentrok dgn resi berikutnya
+
+                    msg_gudang = (f"    ✨ [GUDANG] Stok Ready: {stok_tersedia} pcs | {sku_pendek} | {nama_produk}.")
+                    log_callback(msg_gudang, tag="gudang")
+                    
+                    if gudang_log_callback:
+                        gudang_log_callback(f"📦 Resi {resi} | 🟢 {jumlah} pcs | {sku_pendek} | {nama_produk} ({sku_asli}) -> Sisa Gudang: {info_stok['stok']}", tag="gudang")
+                    
+                    ambil_gudang_log.append({
+                        'sku_master': sku_asli,
+                        'sku_pendek': sku_pendek,
+                        'jumlah':     jumlah
+                    })
+                else:
+                    gudang_flag[sku_dasar] = False
+
 
             # =====================================================
             # Loop qty: setiap unit mendapat folder/file terpisah
@@ -388,8 +529,19 @@ def proses_data(file_pesanan, file_database, folder_master_desain, folder_output
                     file_counter_resi[nama_file_dicari] += 1
                     urutan = file_counter_resi[nama_file_dicari]
 
+                    # Jika sudah ditandai ambil dari gudang
+                    if gudang_flag.get(sku_dasar):
+                        log_data.append({
+                            'Waktu': datetime.now().strftime('%H:%M:%S'),
+                            'Resi': resi, 'SKU Pesanan': sku_pesanan,
+                            'File Dicari': nama_file_dicari,
+                            'Status': 'GUDANG', 'Keterangan': 'Diambil dari gudang'
+                        })
+                        continue  # Lanjut ke item berikutnya tanpa copy fisik
+
                     status_log = 'GAGAL'
                     ket = "File tidak ditemukan di Master Desain"
+
 
                     if path_sumber_file:
                         status_log = 'SUKSES'
@@ -424,15 +576,22 @@ def proses_data(file_pesanan, file_database, folder_master_desain, folder_output
                     })
 
     if log_data:
-        pd.DataFrame(log_data).to_excel(nama_file_log, index=False)
-        log_callback(f"\n💾 Log disimpan: {os.path.basename(nama_file_log)}")
+        log_gudang = [x for x in log_data if x['Status'] == 'GUDANG']
+        with pd.ExcelWriter(nama_file_log) as writer:
+            pd.DataFrame(log_data).to_excel(writer, sheet_name='Semua Proses', index=False)
+            if log_gudang:
+                pd.DataFrame(log_gudang).to_excel(writer, sheet_name='Ambil Gudang', index=False)
+                
+        log_callback(f"\n💾 Log disimpan: {os.path.basename(nama_file_log)} (Termasuk tab 'Ambil Gudang')")
+        
     if label_data:
         pd.DataFrame(label_data).to_excel(nama_file_label, index=False)
         log_callback(f"🏷️  Label disimpan: {os.path.basename(nama_file_label)}")
 
-    total = len(log_data)
+    total    = len(log_data)
     berhasil = sum(1 for item in log_data if item['Status'] == 'SUKSES')
-    gagal = total - berhasil
+    gudang   = sum(1 for item in log_data if item['Status'] == 'GUDANG')
+    gagal    = total - berhasil - gudang
 
     if gagal > 0:
         log_callback("\n" + "─" * 55, tag="error")
@@ -447,6 +606,7 @@ def proses_data(file_pesanan, file_database, folder_master_desain, folder_output
     log_callback("═" * 55)
     log_callback(f"   Total File Di-request  : {total}")
     log_callback(f"   Berhasil Diproses      : {berhasil}", tag="success")
+    log_callback(f"   ✨ Diambil dari Gudang  : {gudang} pcs", tag="gudang")
     log_callback(f"   Gagal / Tidak Ditemukan: {gagal}", tag="error" if gagal > 0 else "success")
     log_callback(f"   🎨 Desain Custom       : {len(custom_data)} pcs", tag="warn")
     log_callback("═" * 55)
@@ -461,6 +621,13 @@ def proses_data(file_pesanan, file_database, folder_master_desain, folder_output
     log_callback(f"⏱️  Durasi Total           : {durasi_str}", tag="success")
     log_callback("═" * 55)
     log_callback("\n✅  SEMUA PESANAN TELAH SELESAI DIPROSES ✅", tag="success")
+
+    # ── Catat log gudang ke LOG_KELUAR ──────────────────────────
+    if ambil_gudang_log:
+        set_status("📝  Mencatat log pengambilan gudang...")
+        log_keluar_gudang(
+            spreadsheet_id, json_key_path, ambil_gudang_log, log_callback
+        )
 
     # ── Sync ke Google Sheets (setelah semua file & log Excel selesai) ──────
     sync_ok = sync_to_google_sheets(
@@ -491,13 +658,15 @@ TEXT_DIM    = "#9090b0"   # Teks redup / subtitle
 COLOR_OK    = "#23c78e"   # Warna sukses
 COLOR_ERR   = "#f26c6c"   # Warna error
 COLOR_WARN  = "#f5a623"   # Warna peringatan
+COLOR_GUDANG = "#00e5ff"  # Warna info gudang (Cyan terang)
 LOG_BG      = "#12121f"   # Background log hitam
 BORDER      = "#3a3a55"   # Warna border
 
 class SortirDesainApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("🤖 Robot Sortir Desain — Ganci")
+        self.app_version = get_version()
+        self.root.title(f"🤖 Robot Sortir Desain — Ganci v{self.app_version}")
         self.root.geometry("900x820")
         self.root.minsize(800, 680)
         self.root.configure(bg=DARK_BG)
@@ -512,6 +681,8 @@ class SortirDesainApp:
         self.mode_var                 = tk.IntVar(value=cfg.get('mode', 1))
 
         self._build_ui()
+        # Tampilkan notifikasi update setelah mainloop sempat render UI dasar.
+        self.root.after(400, self._show_update_notification)
 
     # ----------------------------------------------------------
     # Builder UI
@@ -526,7 +697,7 @@ class SortirDesainApp:
         title_bar.pack(fill=tk.X, padx=24)
 
         tk.Label(
-            title_bar, text="⚙️  Robot Sortir Desain Otomatis",
+            title_bar, text=f"⚙️  Robot Sortir Desain Otomatis  v{self.app_version}",
             font=("Segoe UI", 17, "bold"),
             bg=DARK_BG, fg=ACCENT2
         ).pack(side=tk.LEFT)
@@ -627,8 +798,9 @@ class SortirDesainApp:
                        small=True).grid(row=1, column=2, pady=5)
 
         tk.Label(gs_inner,
-                 text="  ⓘ  Kosongkan kedua field di atas jika tidak menggunakan Google Sheets",
-                 bg=PANEL_BG, fg=TEXT_DIM,
+                 text="  ⓘ  PENTING: Pastikan email 'client_email' dari JSON sudah ditambah sebagai Editor di G-Sheets Anda!\n"
+                      "      Kosongkan kedua field di atas jika tidak menggunakan Google Sheets.",
+                 bg=PANEL_BG, fg=TEXT_DIM, justify="left",
                  font=("Segoe UI", 8, "italic")).grid(
                  row=2, column=0, columnspan=3, sticky="w", pady=(2, 6))
 
@@ -716,11 +888,20 @@ class SortirDesainApp:
         self._make_btn(log_title_bar, "🗑  Hapus Log", self._clear_log,
                        color=BTN_GREY, hover=BTN_GREY_H, small=True).pack(side=tk.RIGHT, padx=12, pady=4)
 
-        log_inner = tk.Frame(log_card, bg=LOG_BG)
+        log_inner = tk.Frame(log_card, bg=PANEL_BG)
         log_inner.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
 
+        self.log_notebook = ttk.Notebook(log_inner, style="Dark.TNotebook")
+        self.log_notebook.pack(fill=tk.BOTH, expand=True)
+
+        tab_semua = tk.Frame(self.log_notebook, bg=LOG_BG)
+        tab_gudang = tk.Frame(self.log_notebook, bg=LOG_BG)
+
+        self.log_notebook.add(tab_semua, text="  🖥️ Semua Proses  ")
+        self.log_notebook.add(tab_gudang, text="  📦 Log Gudang  ")
+
         self.text_log = scrolledtext.ScrolledText(
-            log_inner, state="disabled", wrap="word",
+            tab_semua, state="disabled", wrap="word",
             bg=LOG_BG, fg=TEXT_MAIN,
             font=("Consolas", 10),
             relief="flat", bd=0, padx=12, pady=10,
@@ -728,11 +909,21 @@ class SortirDesainApp:
         )
         self.text_log.pack(fill=tk.BOTH, expand=True)
 
-        # Tag warna log
-        self.text_log.tag_config("error",   foreground=COLOR_ERR,  font=("Consolas", 10, "bold"))
-        self.text_log.tag_config("success", foreground=COLOR_OK,   font=("Consolas", 10, "bold"))
-        self.text_log.tag_config("warn",    foreground=COLOR_WARN, font=("Consolas", 10))
-        self.text_log.tag_config("header",  foreground=ACCENT2,    font=("Consolas", 10, "bold"))
+        self.text_log_gudang = scrolledtext.ScrolledText(
+            tab_gudang, state="disabled", wrap="word",
+            bg=LOG_BG, fg=TEXT_MAIN,
+            font=("Consolas", 10),
+            relief="flat", bd=0, padx=12, pady=10,
+            selectbackground=ACCENT
+        )
+        self.text_log_gudang.pack(fill=tk.BOTH, expand=True)
+
+        for txt_widget in (self.text_log, self.text_log_gudang):
+            txt_widget.tag_config("error",   foreground=COLOR_ERR,   font=("Consolas", 10, "bold"))
+            txt_widget.tag_config("success", foreground=COLOR_OK,    font=("Consolas", 10, "bold"))
+            txt_widget.tag_config("warn",    foreground=COLOR_WARN,  font=("Consolas", 10))
+            txt_widget.tag_config("header",  foreground=ACCENT2,     font=("Consolas", 10, "bold"))
+            txt_widget.tag_config("gudang",  foreground=COLOR_GUDANG, font=("Consolas", 10, "bold"))
 
     # ----------------------------------------------------------
     # Widget Helpers
@@ -809,6 +1000,26 @@ class SortirDesainApp:
         if fn:
             self.json_key_path_var.set(fn)
 
+    def _show_update_notification(self):
+        """
+        Tampilkan info dialog kalau updater (dipanggil dari run.bat) baru saja
+        sukses memperbarui kode. Dipakai sekali — flag dihapus oleh
+        ``consume_update_flag()`` setelah dibaca.
+        """
+        flag = consume_update_flag()
+        if not flag:
+            return
+        old = flag.get('old_version', '?')
+        new = flag.get('new_version', '?')
+        ts = flag.get('timestamp', '')
+        messagebox.showinfo(
+            "✅ Aplikasi Telah Diupdate",
+            f"Aplikasi otomatis di-update ke versi terbaru.\n\n"
+            f"Versi sebelumnya : {old}\n"
+            f"Versi sekarang   : {new}\n"
+            f"Waktu update     : {ts}"
+        )
+
     def show_cloud_warning(self):
         """Callback untuk notifikasi gagal sync cloud (dipanggil via root.after)."""
         def _warn():
@@ -830,9 +1041,10 @@ class SortirDesainApp:
             messagebox.showwarning("Peringatan", "Folder output belum ada atau belum dipilih.\nSilakan pilih Folder Output terlebih dahulu.")
 
     def _clear_log(self):
-        self.text_log.config(state="normal")
-        self.text_log.delete(1.0, tk.END)
-        self.text_log.config(state="disabled")
+        for w in (self.text_log, self.text_log_gudang):
+            w.config(state="normal")
+            w.delete(1.0, tk.END)
+            w.config(state="disabled")
 
     def log_message(self, message, tag=None):
         def _append():
@@ -843,6 +1055,17 @@ class SortirDesainApp:
                 self.text_log.insert(tk.END, message + "\n")
             self.text_log.see(tk.END)
             self.text_log.config(state="disabled")
+        self.root.after(0, _append)
+
+    def log_gudang_message(self, message, tag=None):
+        def _append():
+            self.text_log_gudang.config(state="normal")
+            if tag:
+                self.text_log_gudang.insert(tk.END, message + "\n", tag)
+            else:
+                self.text_log_gudang.insert(tk.END, message + "\n")
+            self.text_log_gudang.see(tk.END)
+            self.text_log_gudang.config(state="disabled")
         self.root.after(0, _append)
 
     def update_progress(self, current, total):
@@ -918,7 +1141,7 @@ class SortirDesainApp:
             args=(file_pes, file_db, folder_master, folder_output,
                   self.log_message, self.update_progress, self.process_finished,
                   self.update_status, self.show_cloud_warning,
-                  spreadsheet_id, json_key_path, mode)
+                  spreadsheet_id, json_key_path, mode, True, self.log_gudang_message)
         )
         t.daemon = True
         t.start()

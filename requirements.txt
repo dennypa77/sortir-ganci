@@ -1,0 +1,13 @@
+# Core dependencies untuk Robot Sortir Desain & Stasiun Sortir
+# Install: pip install -r requirements.txt
+
+pandas>=2.0
+openpyxl>=3.1
+
+# Google Sheets sync (opsional — aplikasi tetap jalan tanpa ini, tapi
+# fitur sinkronisasi cloud akan di-skip otomatis)
+gspread>=6.0
+google-auth>=2.20
+
+# UI modern untuk stasiun_sortir.py (scan-to-sort)
+customtkinter>=5.2

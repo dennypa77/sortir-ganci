@@ -1,34 +1,29 @@
 @echo off
 REM ===========================================================
-REM == Tombol Start Robot Sortir Desain (Ganci Project)      ==
-REM == File ini harus 1 folder dengan sortir_desain.py       ==
+REM == Tombol Start Stasiun Sortir Ganci (scan-to-sort)      ==
+REM == File ini harus 1 folder dengan stasiun_sortir.py      ==
 REM ===========================================================
 
-REM Pindah ke folder script (penting saat dipanggil via shortcut)
 cd /d "%~dp0"
 
 echo.
 echo ============================================================
 echo  Memeriksa update aplikasi...
 echo ============================================================
-
-REM 1. Auto-update via git pull (silent, gagal pun lanjut ke aplikasi)
 python -m core.updater
 
 echo.
 echo ============================================================
-echo  Menjalankan Robot Sortir Desain...
-echo  Mohon tunggu, proses sedang berjalan...
+echo  Menjalankan Stasiun Sortir...
+echo  (scan barcode SKU, lihat layar untuk nomor slot resi)
 echo ============================================================
 echo.
 
-REM 2. Jalankan aplikasi utama
-python sortir_desain.py
+python stasiun_sortir.py
 
 echo.
 echo ============================================================
-echo Script telah selesai dijalankan.
-echo Silakan periksa output di atas untuk melihat apakah ada error.
+echo Stasiun Sortir telah ditutup.
 echo ============================================================
 echo.
 
