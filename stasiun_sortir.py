@@ -29,7 +29,7 @@ import os
 import sys
 import threading
 from datetime import datetime
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 
@@ -148,6 +148,12 @@ class StasiunSortirApp(ctk.CTk):
             bar, text="🔊  Test Suara", command=self._test_voice,
             width=130, height=34,
             fg_color="#3d3d56", hover_color="#505070",
+        ).pack(side="right", padx=(8, 0))
+
+        ctk.CTkButton(
+            bar, text="🔍  Cek Sisa", command=self._show_unprocessed_dialog,
+            width=130, height=34,
+            fg_color="#f5a623", hover_color="#d68f1d", text_color="#1e1e2e",
         ).pack(side="right", padx=(8, 0))
 
         ctk.CTkButton(
@@ -493,6 +499,28 @@ class StasiunSortirApp(ctk.CTk):
                 pass
         self.tile_widgets.clear()
         self._refresh_status()
+
+    # ==================================================================
+    # Cek charm belum diproses (audit untuk laser cutting yg ke-skip)
+    # ==================================================================
+    def _show_unprocessed_dialog(self) -> None:
+        """
+        Buka window berisi list charm yg ``remaining > 0`` (belum di-scan).
+
+        Use case: setelah operator scan semua charm hasil cutting, ada
+        kemungkinan beberapa charm ke-skip print/cutting. Window ini
+        menjelaskan apa saja yg kurang supaya bisa di-cetak ulang.
+        Mendukung export ke ``.xlsx``.
+        """
+        if not self.session.demand:
+            messagebox.showinfo(
+                "Belum load pesanan",
+                "Load file pesanan dulu sebelum cek sisa charm.",
+            )
+            return
+
+        rows = self.session.unprocessed_entries()
+        UnprocessedDialog(self, rows, self.session.scanned_count, self.session.total_charm)
 
     # ==================================================================
     # Test suara (diagnostik voice playback)
@@ -1050,6 +1078,184 @@ class StasiunSortirApp(ctk.CTk):
         self._add_history("release", "", released_resi, slot)
         self._refresh_status()
         self.session.save()
+
+
+class UnprocessedDialog(ctk.CTkToplevel):
+    """
+    Window audit charm yg belum di-scan (``remaining > 0``).
+
+    Tampil tabel berisi: SKU full | SKU pesanan asli | Resi | Slot |
+    Ukuran | Sisa | Total. Tombol export ke ``.xlsx``.
+    """
+
+    def __init__(self, parent, rows: list, scanned: int, total: int):
+        super().__init__(parent)
+        self.rows = rows
+        self.parent_app = parent
+
+        self.title("🔍  Charm Belum Diproses — Audit Cutting")
+        self.geometry("960x600")
+        self.minsize(800, 500)
+        self.configure(fg_color=COLOR_BG)
+        # Modal-ish: di atas main window, tapi tidak grab supaya user bisa
+        # tetap operasikan main app paralel.
+        self.transient(parent)
+        self.after(150, lambda: self.lift())
+
+        # Header summary
+        header = ctk.CTkFrame(self, fg_color=COLOR_PANEL, corner_radius=8)
+        header.pack(fill="x", padx=20, pady=(20, 8))
+
+        unique_resi = len({r['resi'] for r in rows})
+        total_charm_belum = sum(r['remaining'] for r in rows)
+
+        title_text = "📋  Audit Charm Belum Di-Scan"
+        ctk.CTkLabel(
+            header, text=title_text,
+            font=("Segoe UI", 16, "bold"), text_color=COLOR_ACCENT2,
+            anchor="w",
+        ).pack(fill="x", padx=16, pady=(12, 4))
+
+        if rows:
+            summary = (
+                f"Sisa {total_charm_belum} charm dari {unique_resi} resi belum di-scan. "
+                f"Progress: {scanned}/{total}."
+            )
+            color = COLOR_WARN
+        else:
+            summary = (
+                f"✅  Semua {total} charm sudah di-scan. Tidak ada yang ke-skip cutting."
+            )
+            color = COLOR_OK
+
+        ctk.CTkLabel(
+            header, text=summary, font=("Segoe UI", 11),
+            text_color=color, anchor="w",
+        ).pack(fill="x", padx=16, pady=(0, 12))
+
+        # Tabel ttk.Treeview — dark style biar match tema CTk.
+        table_card = ctk.CTkFrame(self, fg_color=COLOR_PANEL, corner_radius=8)
+        table_card.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+
+        style = ttk.Style(self)
+        style.theme_use("default")
+        style.configure(
+            "Audit.Treeview",
+            background="#1a1a2e", foreground=COLOR_TEXT,
+            fieldbackground="#1a1a2e", rowheight=26,
+            borderwidth=0, font=("Consolas", 10),
+        )
+        style.configure(
+            "Audit.Treeview.Heading",
+            background=COLOR_PANEL, foreground=COLOR_ACCENT2,
+            font=("Segoe UI", 10, "bold"), borderwidth=0,
+        )
+        style.map("Audit.Treeview", background=[("selected", COLOR_ACTIVE)])
+
+        cols = ("sku", "sku_asli", "resi", "slot", "ukuran", "sisa", "total")
+        headings = {
+            "sku":      ("SKU Charm",       260),
+            "sku_asli": ("SKU Pesanan",     220),
+            "resi":     ("Resi",            180),
+            "slot":     ("Slot",             60),
+            "ukuran":   ("Uk.",              50),
+            "sisa":     ("Sisa",             60),
+            "total":    ("Total",            60),
+        }
+
+        tree_frame = ctk.CTkFrame(table_card, fg_color="#1a1a2e")
+        tree_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        self.tree = ttk.Treeview(
+            tree_frame, columns=cols, show="headings",
+            style="Audit.Treeview",
+        )
+        for c in cols:
+            label, width = headings[c]
+            anchor = "center" if c in ("slot", "ukuran", "sisa", "total") else "w"
+            self.tree.heading(c, text=label)
+            self.tree.column(c, width=width, anchor=anchor, stretch=(c == "sku" or c == "sku_asli"))
+
+        vscroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vscroll.set)
+        vscroll.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
+
+        for r in rows:
+            self.tree.insert("", "end", values=(
+                r['full_sku'],
+                r['sku_pesanan_asli'],
+                r['resi'],
+                r['slot'] if r['slot'] is not None else "—",
+                r['ukuran'],
+                r['remaining'],
+                r['total_di_resi'],
+            ))
+
+        # Toolbar bawah
+        toolbar = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        toolbar.pack(fill="x", padx=20, pady=(0, 16))
+
+        self.btn_export = ctk.CTkButton(
+            toolbar, text="📊  Export ke Excel", command=self._export_excel,
+            width=180, height=36,
+            fg_color="#23c78e", hover_color="#1da87a",
+        )
+        self.btn_export.pack(side="left")
+        if not rows:
+            self.btn_export.configure(state="disabled")
+
+        ctk.CTkButton(
+            toolbar, text="Tutup", command=self.destroy,
+            width=100, height=36,
+            fg_color="#3d3d56", hover_color="#505070",
+        ).pack(side="right")
+
+    def _export_excel(self) -> None:
+        """Tulis self.rows ke .xlsx via pandas. Default folder: Output/."""
+        if not self.rows:
+            return
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_name = f"charm_belum_diproses_{ts}.xlsx"
+
+        # Tawarkan dialog Save As — operator bisa pilih lokasi.
+        out_dir = os.path.join(_APP_DIR, "Output")
+        os.makedirs(out_dir, exist_ok=True)
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="Simpan audit charm belum diproses",
+            initialdir=out_dir,
+            initialfile=default_name,
+            defaultextension=".xlsx",
+            filetypes=[("Excel Workbook", "*.xlsx"), ("All Files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            import pandas as pd
+            df = pd.DataFrame([{
+                'SKU Charm':      r['full_sku'],
+                'SKU Pesanan':    r['sku_pesanan_asli'],
+                'Resi':           r['resi'],
+                'Slot':           r['slot'] if r['slot'] is not None else '',
+                'Ukuran':         r['ukuran'],
+                'Sisa':           r['remaining'],
+                'Total di Resi':  r['total_di_resi'],
+            } for r in self.rows])
+            df.to_excel(path, index=False)
+            messagebox.showinfo(
+                "Export sukses",
+                f"File disimpan:\n{path}\n\n{len(self.rows)} baris audit charm.",
+                parent=self,
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Export gagal",
+                f"Tidak bisa menulis file:\n{e}",
+                parent=self,
+            )
 
 
 # ──────────────────────────────────────────────────────────────────

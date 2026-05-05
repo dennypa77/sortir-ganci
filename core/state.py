@@ -153,6 +153,47 @@ class SortirState:
         return total - sisa, total
 
     # ──────────────────────────────────────────────────────────
+    # Unprocessed audit (charm yg belum di-scan)
+    # ──────────────────────────────────────────────────────────
+    def unprocessed_entries(self) -> List[dict]:
+        """
+        Return list entry yang ``remaining > 0``: charm yg masih dibutuhkan
+        oleh resi tapi belum di-scan.
+
+        Tiap dict berisi: ``full_sku``, ``sku_pesanan_asli``, ``resi``,
+        ``slot`` (None kalau resi belum register), ``ukuran``, ``remaining``,
+        ``total_di_resi`` (qty asli dari pesanan).
+
+        Sort: by SKU full, lalu by resi → mudah dibaca/group saat audit
+        cetak ulang charm yg ke-skip dari laser cutting.
+        """
+        out: List[dict] = []
+        for full_sku, entries in self.demand.items():
+            # Ekstrak ukuran dari suffix (-L/-S/-M/-BS).
+            parts = full_sku.rsplit('-', 1)
+            ukuran = parts[1] if len(parts) == 2 else ''
+            for e in entries:
+                rem = int(e.get('remaining', 0))
+                if rem <= 0:
+                    continue
+                resi = e.get('resi', '')
+                # Cari total qty asli dari resi_summary (tidak selalu tersedia
+                # per-SKU karena breakdown bisa di-merge — fallback ke remaining).
+                total_breakdown = self.resi_summary.get(resi, {}) \
+                    .get('sku_breakdown', {}).get(full_sku, rem)
+                out.append({
+                    'full_sku':         full_sku,
+                    'sku_pesanan_asli': e.get('sku_pesanan_asli', ''),
+                    'resi':             resi,
+                    'slot':             self.slot_map.get(resi),
+                    'ukuran':           ukuran,
+                    'remaining':        rem,
+                    'total_di_resi':    int(total_breakdown),
+                })
+        out.sort(key=lambda r: (r['full_sku'], r['resi']))
+        return out
+
+    # ──────────────────────────────────────────────────────────
     # Persistence
     # ──────────────────────────────────────────────────────────
     def to_dict(self) -> dict:
