@@ -175,12 +175,15 @@ def resolve_bundle(sku_pesanan: str, ukuran: str, df_database=None) -> BundleRes
             Boleh `None` (mis. saat dipanggil dari stasiun_sortir tanpa DB).
 
     Urutan resolusi (kompatibel dgn `proses_data` versi inline):
-      1. Jika token `-SET-` muncul → bundle. Komponen di-resolve via DB →
-         lalu `parse_dynamic_sku` sebagai fallback.
-      2. Else jika ukuran ∈ {S, M, BS} → coba match DB bundle. Jika gagal,
-         coba `parse_dynamic_sku`. Jika keduanya gagal → **bukan bundle**
-         (item tunggal S/M/BS).
-      3. Lainnya (mis. ukuran=L) → item tunggal.
+      1. Jika ukuran=L (atau bukan S/M/BS) → selalu item tunggal, walau
+         nama SKU mengandung token `-SET-`. Konvensi: ukuran L tidak
+         pernah bundle — marketplace kadang memberi nama SKU satuan
+         dengan token `SET` (mis. `GK-ATM-SET-0004774-L`).
+      2. Else jika token `-SET-` muncul → bundle. Komponen di-resolve via
+         DB → lalu `parse_dynamic_sku` sebagai fallback.
+      3. Else (ukuran ∈ {S, M, BS} tanpa SET) → coba match DB bundle.
+         Jika gagal, coba `parse_dynamic_sku`. Jika keduanya gagal →
+         **bukan bundle** (item tunggal S/M/BS).
 
     Untuk kasus bundle, list dipotong sesuai `ATURAN_BUNDLE[ukuran]` jika
     ukuran tersebut diatur (S=5, M=5, BS=10).
@@ -193,7 +196,11 @@ def resolve_bundle(sku_pesanan: str, ukuran: str, df_database=None) -> BundleRes
     sku_bundle_dasar = sku_pesanan.rsplit('-', 1)[0]
     res = BundleResolution(is_bundle=False, sku_bundle_dasar=sku_bundle_dasar)
 
-    has_set = "-SET-" in sku_pesanan.upper()
+    # Ukuran L (atau bukan S/M/BS) selalu satuan, bahkan jika nama SKU
+    # mengandung token `-SET-`. Marketplace kadang memberi nama SKU satuan
+    # dengan token `SET` (mis. `GK-ATM-SET-0004774-L`) — sebelumnya jatuh
+    # ke path bundle dan gagal resolve karena bukan range numerik.
+    has_set = "-SET-" in sku_pesanan.upper() and ukuran in UKURAN_BUNDLE_CAPABLE
 
     if has_set:
         res.is_bundle = True

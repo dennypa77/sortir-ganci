@@ -11,3 +11,10 @@ google-auth>=2.20
 
 # UI modern untuk stasiun_sortir.py (scan-to-sort)
 customtkinter>=5.2
+
+# === Optional dev tools ===
+# edge-tts hanya dipakai oleh `generate_audio.py` (sekali untuk membuat
+# audio/slot_NN.mp3). Runtime stasiun_sortir TIDAK butuh edge-tts —
+# playback pakai Windows MCI built-in (winmm.dll). Uncomment kalau mau
+# regenerate audio dengan voice / kalimat yang berbeda:
+# edge-tts>=6.1

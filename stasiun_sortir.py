@@ -33,12 +33,18 @@ from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
+from core import animations, voice
 from core.config import load_config, save_config
 from core.pesanan import load_pesanan_demand, total_charm_initial
 from core.sku_utils import alias_atm_anm, normalize_sku, pad_sku_unit
 from core.state import SortirState, build_initial_state
 from core.updater import consume_update_flag
 from core.version import get_version
+
+# Folder berisi `slot_NN.mp3` di-bundle bareng app. Resolve dari lokasi file
+# ini supaya tetap ketemu bila app di-launch dari direktori berbeda.
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+_AUDIO_DIR = os.path.join(_APP_DIR, "audio")
 
 # ── Sound (Windows). Optional — gracefully no-op kalau tidak tersedia. ─────
 try:
@@ -100,6 +106,10 @@ class StasiunSortirApp(ctk.CTk):
         # State utama
         self.session: SortirState = SortirState()
         self.tile_widgets: dict = {}  # slot_number → frame widget di grid
+
+        # Voice playback (slot number TTS) — gracefully no-op kalau folder
+        # audio tidak ada (mis. user belum run generate_audio.py).
+        voice.set_audio_dir(_AUDIO_DIR)
 
         self._build_ui()
         self.after(400, self._show_update_notification)
@@ -185,60 +195,74 @@ class StasiunSortirApp(ctk.CTk):
         self.scan_entry.bind("<Escape>", lambda e: self.scan_var.set(""))
         self.scan_entry.configure(state="disabled")
 
-        # Result strip — kompak horizontal: nomor slot + info ringkas.
-        # Drop charm panel sengaja KECIL supaya slot grid (di bawah) bisa
-        # jadi area utama yang dilihat packer.
-        result_card = ctk.CTkFrame(self, fg_color=COLOR_PANEL, corner_radius=10)
-        result_card.pack(fill="x", padx=24, pady=8)
-        result_inner = ctk.CTkFrame(result_card, fg_color=COLOR_PANEL)
-        result_inner.pack(fill="x", padx=14, pady=10)
+        # Main split horizontal: result panel kiri (sidebar) + slot grid kanan.
+        # Sidebar sempit & stack vertikal supaya slot grid dapat ruang vertikal
+        # yang luas — area utama yang dilihat packer.
+        main_split = ctk.CTkFrame(self, fg_color=COLOR_BG)
+        main_split.pack(fill="both", expand=True, padx=24, pady=(0, 8))
 
-        # Kotak nomor slot — kecil di kiri (lebar tetap, font 56pt)
+        # Result sidebar — kolom kiri, fixed width.
+        result_card = ctk.CTkFrame(
+            main_split, fg_color=COLOR_PANEL, corner_radius=10,
+            width=300,
+        )
+        result_card.pack(side="left", fill="y", padx=(0, 12))
+        result_card.pack_propagate(False)
+        result_inner = ctk.CTkFrame(result_card, fg_color=COLOR_PANEL)
+        result_inner.pack(fill="x", padx=14, pady=14)
+
+        # Kotak nomor slot — di atas, full width sidebar.
         slot_box = ctk.CTkFrame(
             result_inner, fg_color=COLOR_IDLE, corner_radius=10,
-            width=130, height=110,
+            height=140,
         )
-        slot_box.pack(side="left")
+        slot_box.pack(fill="x")
         slot_box.pack_propagate(False)
+        # CTkFont shared object — bisa di-configure(size=...) untuk bounce anim
+        # tanpa recreate font setiap frame.
+        self._big_font_base_size = 64
+        self._big_font = ctk.CTkFont(
+            family="Segoe UI", size=self._big_font_base_size, weight="bold",
+        )
         self.result_big_label = ctk.CTkLabel(
             slot_box, text="—",
-            font=("Segoe UI", 56, "bold"), text_color="white",
+            font=self._big_font, text_color="white",
         )
         self.result_big_label.pack(expand=True)
         self._result_slot_box = slot_box  # untuk ubah warna background
 
-        # Info di kanan — stack vertikal (kind, resi, sku, sisa)
+        # Info di bawah slot box — stack vertikal (kind, resi, sku, sisa).
         info = ctk.CTkFrame(result_inner, fg_color=COLOR_PANEL)
-        info.pack(side="left", fill="both", expand=True, padx=(16, 0))
+        info.pack(fill="x", pady=(14, 0))
 
         self.result_kind_label = ctk.CTkLabel(
             info, text="BELUM LOAD PESANAN",
             font=("Segoe UI", 14, "bold"), text_color=COLOR_DIM,
-            anchor="w",
+            anchor="w", justify="left", wraplength=270,
         )
-        self.result_kind_label.pack(fill="x", pady=(0, 4))
+        self.result_kind_label.pack(fill="x", pady=(0, 6))
 
         self.result_resi_label = ctk.CTkLabel(
             info, text="", font=("Consolas", 13, "bold"),
-            text_color=COLOR_TEXT, anchor="w",
+            text_color=COLOR_TEXT, anchor="w", justify="left", wraplength=270,
         )
-        self.result_resi_label.pack(fill="x", pady=(0, 2))
+        self.result_resi_label.pack(fill="x", pady=(0, 4))
 
         self.result_sku_label = ctk.CTkLabel(
             info, text="", font=("Consolas", 11),
-            text_color=COLOR_DIM, anchor="w",
+            text_color=COLOR_DIM, anchor="w", justify="left", wraplength=270,
         )
-        self.result_sku_label.pack(fill="x", pady=(0, 2))
+        self.result_sku_label.pack(fill="x", pady=(0, 4))
 
         self.result_sisa_label = ctk.CTkLabel(
             info, text="", font=("Segoe UI", 11, "italic"),
-            text_color=COLOR_DIM, anchor="w",
+            text_color=COLOR_DIM, anchor="w", justify="left", wraplength=270,
         )
         self.result_sisa_label.pack(fill="x")
 
-        # Slot grid — area utama, mengisi sisa ruang vertikal.
-        grid_card = ctk.CTkFrame(self, fg_color=COLOR_PANEL, corner_radius=10)
-        grid_card.pack(fill="both", expand=True, padx=24, pady=(0, 8))
+        # Slot grid — area utama di kanan main_split, mengisi sisa ruang.
+        grid_card = ctk.CTkFrame(main_split, fg_color=COLOR_PANEL, corner_radius=10)
+        grid_card.pack(side="left", fill="both", expand=True)
 
         grid_header = ctk.CTkFrame(grid_card, fg_color=COLOR_PANEL)
         grid_header.pack(fill="x", padx=14, pady=(10, 4))
@@ -258,6 +282,10 @@ class StasiunSortirApp(ctk.CTk):
             grid_card, fg_color="#1a1a2e", corner_radius=6,
         )
         self.slot_grid_scroll.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        # 5 kolom dgn weight sama supaya 1-5 sebaris, 6-10 baris berikutnya.
+        for c in range(self.GRID_COLS):
+            self.slot_grid_scroll.grid_columnconfigure(c, weight=1, uniform="slot_col")
 
         # History panel — compact di bawah
         hist_card = ctk.CTkFrame(self, fg_color=COLOR_PANEL, corner_radius=8)
@@ -520,10 +548,12 @@ class StasiunSortirApp(ctk.CTk):
             return
 
         slot = self.session.assign_slot(target)
+        # Buat tile dulu sebelum render result agar pulse animation bisa
+        # menemukan tile target di slot grid.
+        self._add_or_update_tile(slot, target)
         self._render_setup_assign(target, slot)
         _beep("register")
         self._add_history("setup_new", "", target, slot)
-        self._add_or_update_tile(slot, target)
         self._refresh_status()
 
     def _find_resi_in_pesanan(self, scanned: str) -> str:
@@ -578,12 +608,13 @@ class StasiunSortirApp(ctk.CTk):
         sisa_di_resi = self.session.decrement_resi(resi)
         sudah_total, total_total = self.session.progress_of(resi)
 
+        # Update tile slot DULU — kalau resi baru complete, fade ungu→hijau
+        # mulai sekarang dan akan tampil utuh (pulse di _render_match conditional
+        # supaya tidak menimpa fade saat completion).
+        self._add_or_update_tile(slot, resi)
         self._render_match(slot, resi, full_sku, sudah_total, total_total)
         _beep("match")
         self._add_history("sort_match", full_sku, resi, slot)
-
-        # Update tile slot — hijau kalau resi complete.
-        self._add_or_update_tile(slot, resi)
         self._refresh_status()
 
     def _lookup_sku(self, scanned: str) -> str:
@@ -613,12 +644,34 @@ class StasiunSortirApp(ctk.CTk):
     # Render BIG result
     # ==================================================================
     def _set_slot_box(self, text: str, bg_color: str) -> None:
-        """Update kotak nomor slot di kiri result strip (warna BG + teks)."""
+        """
+        Update kotak nomor slot di sidebar (warna BG + teks).
+
+        Memicu bounce animation pada angka kalau text berubah dari nilai
+        sebelumnya — pop visual saat slot baru di-tunjuk supaya packer
+        langsung sadar update.
+        """
+        prev_text = self.result_big_label.cget("text")
         self._result_slot_box.configure(fg_color=bg_color)
         self.result_big_label.configure(text=text, fg_color=bg_color, text_color="white")
+        if text != prev_text and text not in ("", "—"):
+            animations.bounce_font(
+                self.result_big_label,
+                self._big_font,
+                base_size=self._big_font_base_size,
+                peak_size=self._big_font_base_size + 10,
+                duration_ms=180,
+            )
 
     def _render_match(self, slot, resi, sku, sudah, total):
         self._set_slot_box(str(slot) if slot is not None else "?", COLOR_OK)
+        if slot is not None:
+            voice.play_slot_voice(slot)
+            # Kalau scan ini melengkapi resi, fade ungu→hijau di tile yang
+            # sudah di-trigger _update_tile yang jadi feedback completion.
+            # Pulse hanya saat resi belum complete agar tidak menimpa fade.
+            if sudah < total:
+                self._pulse_tile_target(slot)
         self.result_kind_label.configure(
             text="✅  DROP CHARM DI SLOT INI",
             text_color=COLOR_OK,
@@ -669,6 +722,8 @@ class StasiunSortirApp(ctk.CTk):
 
     def _render_setup_assign(self, resi, slot):
         self._set_slot_box(str(slot), COLOR_OK)
+        voice.play_slot_voice(slot)
+        self._pulse_tile_target(slot)
         self.result_kind_label.configure(
             text="✅  RESI TER-REGISTER",
             text_color=COLOR_OK,
@@ -838,7 +893,7 @@ class StasiunSortirApp(ctk.CTk):
 
         tile = ctk.CTkFrame(
             self.slot_grid_scroll, fg_color=fg, corner_radius=10,
-            width=170, height=115,
+            width=180, height=140,
         )
         tile.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
         tile.grid_propagate(False)
@@ -849,24 +904,24 @@ class StasiunSortirApp(ctk.CTk):
 
         # Nomor slot — besar, prominent
         lbl_num = ctk.CTkLabel(
-            tile, text=str(slot), font=("Segoe UI", 36, "bold"),
+            tile, text=str(slot), font=("Segoe UI", 38, "bold"),
             text_color="white", fg_color=fg,
         )
-        lbl_num.pack(pady=(8, 0))
+        lbl_num.pack(pady=(6, 0))
         lbl_num.bind("<Button-1>", _on_click)
 
         # Resi (truncated 16 char terakhir biar muat di tile lebar)
         resi_txt = (resi[-16:] if resi else "—")
         lbl_resi = ctk.CTkLabel(
-            tile, text=resi_txt, font=("Consolas", 10, "bold"),
+            tile, text=resi_txt, font=("Consolas", 11, "bold"),
             text_color="white", fg_color=fg,
         )
-        lbl_resi.pack()
+        lbl_resi.pack(pady=(0, 2))
         lbl_resi.bind("<Button-1>", _on_click)
 
-        # Sub text (progress / status)
+        # Sub text (progress / status) — diperbesar agar "X/Y charm" mudah dibaca
         lbl_sub = ctk.CTkLabel(
-            tile, text=sub_text, font=("Segoe UI", 10, "italic"),
+            tile, text=sub_text, font=("Segoe UI", 14, "bold"),
             text_color="white", fg_color=fg,
         )
         lbl_sub.pack(pady=(0, 8))
@@ -876,18 +931,48 @@ class StasiunSortirApp(ctk.CTk):
         tile._lbl_resi = lbl_resi
         tile._lbl_sub = lbl_sub
         tile._status = status
+        tile._current_fg = fg  # warna fg "settled", dipakai sebagai base anim
         return tile
+
+    def _apply_tile_fg(self, tile, color: str) -> None:
+        """Apply ``color`` ke tile frame + ketiga child labels-nya."""
+        try:
+            tile.configure(fg_color=color)
+            tile._lbl_num.configure(fg_color=color)
+            tile._lbl_resi.configure(fg_color=color)
+            tile._lbl_sub.configure(fg_color=color)
+        except Exception:
+            pass  # widget bisa saja sudah di-destroy mid-animation
 
     def _update_tile(self, tile, slot, fg, status, resi, sub_text):
         if tile._status != status:
-            tile.configure(fg_color=fg)
-            tile._lbl_num.configure(fg_color=fg)
-            tile._lbl_resi.configure(fg_color=fg)
-            tile._lbl_sub.configure(fg_color=fg)
+            prev_fg = getattr(tile, "_current_fg", fg)
             tile._status = status
+            tile._current_fg = fg
+            # Color fade smooth saat transition (ungu→hijau saat lengkap, dll).
+            animations.animate_color(
+                tile, prev_fg, fg, duration_ms=280,
+                set_fn=lambda c, t=tile: self._apply_tile_fg(t, c),
+            )
         tile._lbl_num.configure(text=str(slot))
         tile._lbl_resi.configure(text=(resi[-14:] if resi else "—"))
         tile._lbl_sub.configure(text=sub_text)
+
+    def _pulse_tile_target(self, slot: int) -> None:
+        """
+        Pulse glow tile slot tujuan saat scan match, supaya mata packer
+        langsung tertarik ke slot yang dimaksud di grid.
+        """
+        tile = self.tile_widgets.get(slot)
+        if tile is None:
+            return
+        base = getattr(tile, "_current_fg", COLOR_OK)
+        # Peak = base di-mix 55% ke putih → cerah tapi masih kelihatan asalnya.
+        peak = animations.interpolate_color(base, "#ffffff", 0.55)
+        animations.pulse_color(
+            tile, base_hex=base, peak_hex=peak, duration_ms=420,
+            set_fn=lambda c, t=tile: self._apply_tile_fg(t, c),
+        )
 
     def _maybe_release_slot(self, slot: int) -> None:
         """Kosongkan slot kalau sudah complete (klik handler dari tile)."""
