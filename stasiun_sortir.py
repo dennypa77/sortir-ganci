@@ -110,6 +110,14 @@ class StasiunSortirApp(ctk.CTk):
         # Voice playback (slot number TTS) — gracefully no-op kalau folder
         # audio tidak ada (mis. user belum run generate_audio.py).
         voice.set_audio_dir(_AUDIO_DIR)
+        # Diagnostik startup → console (kelihatan di run-stasiun.bat).
+        try:
+            n_files = len([f for f in os.listdir(_AUDIO_DIR) if f.endswith(".mp3")]) \
+                if os.path.isdir(_AUDIO_DIR) else 0
+            print(f"[voice] audio_dir = {_AUDIO_DIR}")
+            print(f"[voice] is_available = {voice.is_available()}, mp3_files = {n_files}")
+        except Exception as e:
+            print(f"[voice] startup probe error: {e}")
 
         self._build_ui()
         self.after(400, self._show_update_notification)
@@ -133,6 +141,12 @@ class StasiunSortirApp(ctk.CTk):
 
         ctk.CTkButton(
             bar, text="🔄  Reset", command=self._reset, width=110, height=34,
+            fg_color="#3d3d56", hover_color="#505070",
+        ).pack(side="right", padx=(8, 0))
+
+        ctk.CTkButton(
+            bar, text="🔊  Test Suara", command=self._test_voice,
+            width=130, height=34,
             fg_color="#3d3d56", hover_color="#505070",
         ).pack(side="right", padx=(8, 0))
 
@@ -479,6 +493,34 @@ class StasiunSortirApp(ctk.CTk):
                 pass
         self.tile_widgets.clear()
         self._refresh_status()
+
+    # ==================================================================
+    # Test suara (diagnostik voice playback)
+    # ==================================================================
+    def _test_voice(self) -> None:
+        """Putar 'tujuh' untuk verifikasi audio output. Tampil dialog status."""
+        if not voice.is_available():
+            messagebox.showwarning(
+                "Voice tidak tersedia",
+                f"Folder audio tidak ditemukan atau OS tidak support.\n\n"
+                f"Folder dicari: {_AUDIO_DIR}\n"
+                f"is_available(): {voice.is_available()}",
+            )
+            return
+        voice.play_slot_voice(7)
+        # Cek error setelah delay (audio main async di thread).
+        def show_status():
+            err = voice.last_error()
+            if err:
+                messagebox.showerror(
+                    "Voice gagal",
+                    f"Audio tidak bisa diputar.\n\nError: {err}",
+                )
+            else:
+                # Tidak ada dialog kalau OK — pengguna seharusnya dengar suaranya.
+                # Tapi log ke console untuk konfirmasi.
+                print(f"[voice] test slot 7 → status: {err or 'OK (sudah dimainkan)'}")
+        self.after(1500, show_status)
 
     # ==================================================================
     # Reset

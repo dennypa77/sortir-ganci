@@ -13,8 +13,9 @@ google-auth>=2.20
 customtkinter>=5.2
 
 # === Optional dev tools ===
-# edge-tts hanya dipakai oleh `generate_audio.py` (sekali untuk membuat
-# audio/slot_NN.mp3). Runtime stasiun_sortir TIDAK butuh edge-tts —
-# playback pakai Windows MCI built-in (winmm.dll). Uncomment kalau mau
-# regenerate audio dengan voice / kalimat yang berbeda:
+# edge-tts + imageio-ffmpeg hanya dipakai oleh `generate_audio.py` (sekali
+# untuk membuat audio/slot_NN.mp3 + slot_NN.wav). Runtime stasiun_sortir
+# TIDAK butuh keduanya — playback pakai winsound built-in (untuk WAV) atau
+# Windows MCI fallback (untuk MP3). Uncomment kalau mau regenerate audio:
 # edge-tts>=6.1
+# imageio-ffmpeg>=0.5
