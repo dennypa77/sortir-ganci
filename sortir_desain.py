@@ -131,11 +131,48 @@ def sync_to_google_sheets(spreadsheet_id, json_key_path, pesanan_grouped, log_ca
                 rows_to_append.append([tanggal, resi, sku_pesanan, jumlah, ukuran])
 
         if rows_to_append:
-            sheet.append_rows(rows_to_append, value_input_option='USER_ENTERED')
-            log_callback(
-                f"☁️  ✅ {len(rows_to_append)} baris berhasil dikirim ke Google Sheets!",
-                tag="success"
-            )
+            expected = len(rows_to_append)
+            response = sheet.append_rows(rows_to_append, value_input_option='USER_ENTERED')
+
+            # Verifikasi jumlah baris yang benar-benar terupload via response API.
+            # Response dari Sheets API: {'updates': {'updatedRows': N, ...}, ...}
+            # Tujuan: deteksi partial upload akibat rate limit service account.
+            updated = None
+            try:
+                updated = int(response.get('updates', {}).get('updatedRows'))
+            except (AttributeError, TypeError, ValueError):
+                updated = None
+
+            if updated is None:
+                log_callback(
+                    f"☁️  ✅ {expected} baris dikirim ke Google Sheets "
+                    f"(persentase tidak bisa diverifikasi — response API tidak standar).",
+                    tag="warn"
+                )
+            elif updated == expected:
+                log_callback(
+                    f"☁️  ✅ {updated}/{expected} baris berhasil dikirim ke Google Sheets "
+                    f"(100% terupload).",
+                    tag="success"
+                )
+            elif updated > 0:
+                pct = (updated / expected) * 100
+                missing = expected - updated
+                log_callback(
+                    f"☁️  ⚠️  PARTIAL UPLOAD: {updated}/{expected} baris terupload "
+                    f"({pct:.1f}%) — {missing} baris TIDAK terkirim.\n"
+                    f"   Kemungkinan kena limit service account "
+                    f"(quota Google Sheets API: 60 write/menit, 300 write/menit/project).\n"
+                    f"   Cek manual sheet 'Data_Sales' & upload ulang baris yang hilang bila perlu.",
+                    tag="warn"
+                )
+            else:
+                log_callback(
+                    f"☁️  ❌ 0/{expected} baris terupload (0%) — semua baris GAGAL.\n"
+                    f"   Kemungkinan kena limit service account atau koneksi bermasalah.",
+                    tag="error"
+                )
+                return False
         else:
             log_callback("☁️  Tidak ada data baru untuk dikirim.", tag="warn")
 
