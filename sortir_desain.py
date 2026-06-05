@@ -403,6 +403,18 @@ def proses_data(file_pesanan, file_database, folder_master_desain, folder_output
     # Akumulasi log pengambilan dari gudang
     ambil_gudang_log = []  # list of {sku_master, jumlah, nama_produk}
 
+    # Helper lookup stok 3-tier (urutan dipertahankan dari versi inline):
+    #   1. format Ultra-Short (mis. '481M')
+    #   2. fallback sku_norm dgn ukuran
+    #   3. fallback sku_norm tanpa ukuran (DB kadang simpan tanpa '-L' dsb)
+    def cari_info_stok(sku_master_key, sku_dasar):
+        info = stok_db.get(to_ultra_short_sku(sku_master_key))
+        if info is None:
+            info = stok_db.get(normalize_sku(sku_master_key))
+        if info is None:
+            info = stok_db.get(normalize_sku(sku_dasar))
+        return info
+
     # =========================================================
     # FIX BUG: Gabungkan baris dengan Resi + SKU yang SAMA
     # Sebelumnya: tiap baris diproses terpisah, file saling timpa
@@ -510,46 +522,80 @@ def proses_data(file_pesanan, file_database, folder_master_desain, folder_output
                     log_callback(f"  🏷️  SKU Tunggal (-L) terdeteksi.")
 
             # =====================================================
-            # Cek Stok Gudang per SKU Dasar (SEBELUM loop QTY)
+            # Cek Stok Gudang (SEBELUM loop QTY)
+            #
+            # Bundle (S/M/BS) disimpan di gudang sebagai SATU set di bawah
+            # SKU perwakilan (lead) — ultra-short SET == ultra-short komponen
+            # pertama, mis. 'GK-ATM-SET-481-485-M' → '481M'. Karena itu untuk
+            # bundle stok dicek SEKALI: kalau 1 set ready, SEMUA komponen
+            # ditandai ambil-gudang & stok dikurangi 1× per bundle. Bundle
+            # tidak boleh diambil sebagian — kalau set kurang, semua dicetak.
+            # Item tunggal (L, atau S/M/BS non-bundle) tetap dicek per-SKU.
             # =====================================================
             gudang_flag = {}
-            for sku_dasar in sku_dasar_list:
-                sku_master_key = f"{sku_dasar}-{ukuran}"
-                sku_norm = normalize_sku(sku_master_key)
-                ultra_short = to_ultra_short_sku(sku_master_key)
-                
-                # Cari menggunakan format Ultra-Short terlebih dahulu
-                info_stok = stok_db.get(ultra_short)
+
+            if is_bundle:
+                # Kunci perwakilan = SKU set apa adanya (ultra-short identik
+                # dgn komponen pertama); komponen pertama dipakai utk fallback.
+                sku_perwakilan = f"{sku_dasar_list[0]}-{ukuran}"
+                info_stok = cari_info_stok(sku_pesanan, sku_dasar_list[0])
                 if info_stok is None:
-                    # Fallback ke pencarian format sku_norm
-                    info_stok = stok_db.get(sku_norm)
-                if info_stok is None:
-                    # Fallback ke pencarian tanpa ukuran (jika di DB produk tidak menyertakan '-L' dsb)
-                    info_stok = stok_db.get(normalize_sku(sku_dasar))
+                    info_stok = cari_info_stok(sku_perwakilan, sku_dasar_list[0])
 
                 stok_tersedia = info_stok['stok'] if info_stok else 0
                 nama_produk   = info_stok['nama_produk'] if info_stok else ''
-                sku_asli      = info_stok['sku_asli'] if info_stok else sku_master_key
-                sku_pendek    = info_stok['sku_pendek'] if info_stok else ultra_short
+                sku_asli      = info_stok['sku_asli'] if info_stok else sku_pesanan
+                sku_pendek    = info_stok['sku_pendek'] if info_stok else to_ultra_short_sku(sku_pesanan)
 
-                # Jika stok di memori cukup untuk jumlah pesanan, kurangi & tandai ambil dari gudang
                 if stok_db and info_stok and stok_tersedia >= jumlah:
-                    gudang_flag[sku_dasar] = True
+                    # 1 bundle = 1 unit stok → seluruh komponen ambil dari gudang.
+                    for sku_dasar in sku_dasar_list:
+                        gudang_flag[sku_dasar] = True
                     info_stok['stok'] -= jumlah  # Kurangi stok memory agar tidak bentrok dgn resi berikutnya
 
-                    msg_gudang = (f"    ✨ [GUDANG] Stok Ready: {stok_tersedia} pcs | {sku_pendek} | {nama_produk}.")
+                    msg_gudang = (f"    ✨ [GUDANG] Bundle Ready: {stok_tersedia} set | {sku_pendek} | {nama_produk}.")
                     log_callback(msg_gudang, tag="gudang")
-                    
+
                     if gudang_log_callback:
-                        gudang_log_callback(f"📦 Resi {resi} | 🟢 {jumlah} pcs | {sku_pendek} | {nama_produk} ({sku_asli}) -> Sisa Gudang: {info_stok['stok']}", tag="gudang")
-                    
+                        gudang_log_callback(f"📦 Resi {resi} | 🟢 {jumlah} set | {sku_pendek} | {nama_produk} ({sku_asli}) -> Sisa Gudang: {info_stok['stok']}", tag="gudang")
+
                     ambil_gudang_log.append({
                         'sku_master': sku_asli,
                         'sku_pendek': sku_pendek,
                         'jumlah':     jumlah
                     })
                 else:
-                    gudang_flag[sku_dasar] = False
+                    for sku_dasar in sku_dasar_list:
+                        gudang_flag[sku_dasar] = False
+            else:
+                # Item tunggal — cek stok per SKU dasar (perilaku lama).
+                for sku_dasar in sku_dasar_list:
+                    sku_master_key = f"{sku_dasar}-{ukuran}"
+                    info_stok = cari_info_stok(sku_master_key, sku_dasar)
+
+                    stok_tersedia = info_stok['stok'] if info_stok else 0
+                    nama_produk   = info_stok['nama_produk'] if info_stok else ''
+                    sku_asli      = info_stok['sku_asli'] if info_stok else sku_master_key
+                    sku_pendek    = info_stok['sku_pendek'] if info_stok else to_ultra_short_sku(sku_master_key)
+
+                    # Jika stok di memori cukup untuk jumlah pesanan, kurangi & tandai ambil dari gudang
+                    if stok_db and info_stok and stok_tersedia >= jumlah:
+                        gudang_flag[sku_dasar] = True
+                        info_stok['stok'] -= jumlah  # Kurangi stok memory agar tidak bentrok dgn resi berikutnya
+
+                        msg_gudang = (f"    ✨ [GUDANG] Stok Ready: {stok_tersedia} pcs | {sku_pendek} | {nama_produk}.")
+                        log_callback(msg_gudang, tag="gudang")
+
+                        if gudang_log_callback:
+                            gudang_log_callback(f"📦 Resi {resi} | 🟢 {jumlah} pcs | {sku_pendek} | {nama_produk} ({sku_asli}) -> Sisa Gudang: {info_stok['stok']}", tag="gudang")
+
+                        ambil_gudang_log.append({
+                            'sku_master': sku_asli,
+                            'sku_pendek': sku_pendek,
+                            'jumlah':     jumlah
+                        })
+                    else:
+                        gudang_flag[sku_dasar] = False
 
 
             # =====================================================
@@ -682,30 +728,32 @@ def proses_data(file_pesanan, file_database, folder_master_desain, folder_output
 #  UI — Tampilan Modern dengan Tkinter
 # =============================================================
 
-DARK_BG     = "#1e1e2e"   # Latar belakang utama (navy gelap)
-PANEL_BG    = "#2a2a3e"   # Latar panel / card
-ACCENT      = "#7c6af7"   # Ungu accent
-ACCENT2     = "#56cfcf"   # Teal accent (header teks)
-BTN_GREEN   = "#23c78e"   # Tombol run
-BTN_GREEN_H = "#1da87a"   # Hover tombol run
-BTN_GREY    = "#3d3d56"   # Tombol sekunder
-BTN_GREY_H  = "#505070"
-TEXT_MAIN   = "#e2e2f0"   # Teks utama
-TEXT_DIM    = "#9090b0"   # Teks redup / subtitle
-COLOR_OK    = "#23c78e"   # Warna sukses
-COLOR_ERR   = "#f26c6c"   # Warna error
-COLOR_WARN  = "#f5a623"   # Warna peringatan
-COLOR_GUDANG = "#00e5ff"  # Warna info gudang (Cyan terang)
-LOG_BG      = "#12121f"   # Background log hitam
-BORDER      = "#3a3a55"   # Warna border
+# ── Tema Light (terang) ────────────────────────────────────────────────────
+DARK_BG     = "#eef1f6"   # Latar belakang utama (abu sangat terang)
+PANEL_BG    = "#ffffff"   # Latar panel / card (putih)
+INPUT_BG    = "#f5f7fa"   # Latar field input
+ACCENT      = "#6c5ce7"   # Ungu accent
+ACCENT2     = "#5648c9"   # Ungu gelap (teks header — kontras di latar terang)
+BTN_GREEN   = "#16a34a"   # Tombol run (hijau)
+BTN_GREEN_H = "#15803d"   # Hover tombol run
+BTN_GREY    = "#e2e8f0"   # Tombol sekunder (abu terang)
+BTN_GREY_H  = "#cbd5e1"
+TEXT_MAIN   = "#1f2937"   # Teks utama (gelap)
+TEXT_DIM    = "#6b7280"   # Teks redup / subtitle
+COLOR_OK    = "#16a34a"   # Warna sukses
+COLOR_ERR   = "#dc2626"   # Warna error
+COLOR_WARN  = "#b45309"   # Warna peringatan
+COLOR_GUDANG = "#0e7490"  # Warna info gudang (teal gelap, terbaca di putih)
+LOG_BG      = "#fbfcfe"   # Background log (putih keabu)
+BORDER      = "#d1d5db"   # Warna border
 
 class SortirDesainApp:
     def __init__(self, root):
         self.root = root
         self.app_version = get_version()
         self.root.title(f"🤖 Robot Sortir Desain — Ganci v{self.app_version}")
-        self.root.geometry("900x820")
-        self.root.minsize(800, 680)
+        self.root.geometry("920x860")
+        self.root.minsize(820, 700)
         self.root.configure(bg=DARK_BG)
 
         cfg = load_config()
@@ -726,16 +774,15 @@ class SortirDesainApp:
     # ----------------------------------------------------------
     def _build_ui(self):
         # ── Header strip ──────────────────────────────────────
-        header = tk.Frame(self.root, bg=ACCENT, height=5)
-        header.pack(fill=tk.X)
+        tk.Frame(self.root, bg=ACCENT, height=4).pack(fill=tk.X)
 
         # ── Title bar ─────────────────────────────────────────
-        title_bar = tk.Frame(self.root, bg=DARK_BG, pady=18)
-        title_bar.pack(fill=tk.X, padx=24)
+        title_bar = tk.Frame(self.root, bg=DARK_BG, pady=12)
+        title_bar.pack(fill=tk.X, padx=22)
 
         tk.Label(
             title_bar, text=f"⚙️  Robot Sortir Desain Otomatis  v{self.app_version}",
-            font=("Segoe UI", 17, "bold"),
+            font=("Segoe UI", 16, "bold"),
             bg=DARK_BG, fg=ACCENT2
         ).pack(side=tk.LEFT)
 
@@ -745,139 +792,146 @@ class SortirDesainApp:
             bg=DARK_BG, fg=TEXT_DIM
         ).pack(side=tk.RIGHT, anchor="s", pady=4)
 
-        # ── Main content area ──────────────────────────────────
-        outer = tk.Frame(self.root, bg=DARK_BG)
-        outer.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 16))
-
-        # ── Tab Notebook untuk Pengaturan ─────────────────────
+        # ── Styles (light) ─────────────────────────────────────
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure("Dark.TNotebook", background=DARK_BG, borderwidth=0, tabmargins=[0, 0, 0, 0])
+        # Notebook utama: tab besar
+        style.configure("Main.TNotebook", background=DARK_BG, borderwidth=0, tabmargins=[2, 4, 2, 0])
         style.configure(
-            "Dark.TNotebook.Tab",
-            background=BTN_GREY, foreground=TEXT_DIM,
-            font=("Segoe UI", 9, "bold"),
-            padding=[14, 6], borderwidth=0
+            "Main.TNotebook.Tab",
+            background="#dde3ec", foreground=TEXT_DIM,
+            font=("Segoe UI", 12, "bold"),
+            padding=[28, 12], borderwidth=0
         )
         style.map(
-            "Dark.TNotebook.Tab",
-            background=[("selected", PANEL_BG), ("active", BTN_GREY_H)],
+            "Main.TNotebook.Tab",
+            background=[("selected", PANEL_BG), ("active", "#e8edf4")],
+            foreground=[("selected", ACCENT2), ("active", TEXT_MAIN)],
+        )
+        # Notebook log: tab kecil
+        style.configure("Sub.TNotebook", background=PANEL_BG, borderwidth=0)
+        style.configure(
+            "Sub.TNotebook.Tab",
+            background="#eceff4", foreground=TEXT_DIM,
+            font=("Segoe UI", 9, "bold"),
+            padding=[16, 6], borderwidth=0
+        )
+        style.map(
+            "Sub.TNotebook.Tab",
+            background=[("selected", LOG_BG), ("active", "#e2e8f0")],
             foreground=[("selected", ACCENT2), ("active", TEXT_MAIN)],
         )
         style.configure(
             "Custom.Horizontal.TProgressbar",
-            troughcolor="#1a1a2e", background=ACCENT,
+            troughcolor="#e2e8f0", background=ACCENT,
             lightcolor=ACCENT, darkcolor=ACCENT, bordercolor=BORDER,
-            thickness=12
+            thickness=14
         )
 
-        notebook = ttk.Notebook(outer, style="Dark.TNotebook")
-        notebook.pack(fill=tk.X, pady=(0, 10))
+        # ── Notebook utama: 2 tab (Pengaturan & Proses) ────────
+        main_nb = ttk.Notebook(self.root, style="Main.TNotebook")
+        main_nb.pack(fill=tk.BOTH, expand=True, padx=18, pady=(0, 14))
 
-        # ── Tab 1: Pengaturan File & Folder ───────────────────
-        tab_file = tk.Frame(notebook, bg=PANEL_BG, pady=2)
-        notebook.add(tab_file, text="  📁  Pengaturan File & Folder  ")
+        tab_setting = tk.Frame(main_nb, bg=DARK_BG)
+        tab_proses  = tk.Frame(main_nb, bg=DARK_BG)
+        main_nb.add(tab_setting, text="  ⚙️  Pengaturan  ")
+        main_nb.add(tab_proses,  text="  ▶  Proses  ")
 
-        # Garis dekoratif atas
-        tk.Frame(tab_file, bg=ACCENT, height=2).pack(fill=tk.X)
+        self._build_tab_setting(tab_setting)
+        self._build_tab_proses(tab_proses)
 
-        inner = tk.Frame(tab_file, bg=PANEL_BG, padx=16, pady=10)
+    # ----------------------------------------------------------
+    # Tab Pengaturan — file/folder + integrasi Google Sheets
+    # ----------------------------------------------------------
+    def _build_tab_setting(self, parent):
+        wrap = tk.Frame(parent, bg=DARK_BG, padx=4, pady=10)
+        wrap.pack(fill=tk.BOTH, expand=True)
+
+        # ── Card: File & Folder ───────────────────────────────
+        card_file = self._make_card(wrap, "📁  File & Folder")
+        inner = tk.Frame(card_file, bg=PANEL_BG, padx=18, pady=12)
         inner.pack(fill=tk.X)
         inner.columnconfigure(1, weight=1)
 
         rows = [
-            ("Data Pesanan :",  self.file_pesanan_path,         self._browse_pesanan,       False),
-            ("Database SKU :",  self.file_database_path,        self._browse_database,      False),
-            ("Folder Master :", self.folder_master_desain_path, self._browse_folder_master, True),
-            ("Folder Output :", self.folder_output_path,        self._browse_folder_output, True),
+            ("Data Pesanan :",  self.file_pesanan_path,         self._browse_pesanan),
+            ("Database SKU :",  self.file_database_path,        self._browse_database),
+            ("Folder Master :", self.folder_master_desain_path, self._browse_folder_master),
+            ("Folder Output :", self.folder_output_path,        self._browse_folder_output),
         ]
-        for r, (label, var, cmd, is_folder) in enumerate(rows):
+        for r, (label, var, cmd) in enumerate(rows):
             tk.Label(inner, text=label, bg=PANEL_BG, fg=TEXT_DIM,
-                     font=("Segoe UI", 9), anchor="w", width=14).grid(row=r, column=0, sticky="w", pady=5)
-            ent = tk.Entry(inner, textvariable=var, bg="#1a1a2e", fg=TEXT_MAIN,
-                           insertbackground=TEXT_MAIN, relief="flat",
-                           font=("Segoe UI", 9), bd=0, highlightthickness=1,
-                           highlightbackground=BORDER, highlightcolor=ACCENT)
-            ent.grid(row=r, column=1, sticky="ew", padx=(6, 6), pady=5, ipady=6)
-            self._make_btn(inner, "📂 Pilih", cmd, small=True).grid(row=r, column=2, pady=5)
+                     font=("Segoe UI", 10), anchor="w", width=14).grid(row=r, column=0, sticky="w", pady=6)
+            self._make_entry(inner, var).grid(row=r, column=1, sticky="ew", padx=(8, 8), pady=6, ipady=6)
+            self._make_btn(inner, "📂 Pilih", cmd, small=True).grid(row=r, column=2, pady=6)
 
-        # ── Tab 2: Integrasi Google Sheets ────────────────────
-        tab_gs = tk.Frame(notebook, bg=PANEL_BG, pady=2)
-        notebook.add(tab_gs, text="  ☁️  Integrasi Google Sheets  ")
-
-        tk.Frame(tab_gs, bg=ACCENT, height=2).pack(fill=tk.X)
-
-        gs_inner = tk.Frame(tab_gs, bg=PANEL_BG, padx=16, pady=10)
+        # ── Card: Integrasi Google Sheets ─────────────────────
+        card_gs = self._make_card(wrap, "☁️  Integrasi Google Sheets")
+        gs_inner = tk.Frame(card_gs, bg=PANEL_BG, padx=18, pady=12)
         gs_inner.pack(fill=tk.X)
         gs_inner.columnconfigure(1, weight=1)
 
         tk.Label(gs_inner, text="Spreadsheet ID :", bg=PANEL_BG, fg=TEXT_DIM,
-                 font=("Segoe UI", 9), anchor="w", width=16).grid(
-                 row=0, column=0, sticky="w", pady=5)
-        tk.Entry(gs_inner, textvariable=self.spreadsheet_id_var,
-                 bg="#1a1a2e", fg=TEXT_MAIN, insertbackground=TEXT_MAIN,
-                 relief="flat", font=("Segoe UI", 9), bd=0,
-                 highlightthickness=1, highlightbackground=BORDER,
-                 highlightcolor=ACCENT).grid(
-                 row=0, column=1, columnspan=2, sticky="ew",
-                 padx=(6, 0), pady=5, ipady=6)
+                 font=("Segoe UI", 10), anchor="w", width=16).grid(row=0, column=0, sticky="w", pady=6)
+        self._make_entry(gs_inner, self.spreadsheet_id_var).grid(
+            row=0, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=6, ipady=6)
 
         tk.Label(gs_inner, text="File JSON Key :", bg=PANEL_BG, fg=TEXT_DIM,
-                 font=("Segoe UI", 9), anchor="w", width=16).grid(
-                 row=1, column=0, sticky="w", pady=5)
-        tk.Entry(gs_inner, textvariable=self.json_key_path_var,
-                 bg="#1a1a2e", fg=TEXT_MAIN, insertbackground=TEXT_MAIN,
-                 relief="flat", font=("Segoe UI", 9), bd=0,
-                 highlightthickness=1, highlightbackground=BORDER,
-                 highlightcolor=ACCENT).grid(
-                 row=1, column=1, sticky="ew", padx=(6, 6), pady=5, ipady=6)
-        self._make_btn(gs_inner, "📂 Pilih", self._browse_json_key,
-                       small=True).grid(row=1, column=2, pady=5)
+                 font=("Segoe UI", 10), anchor="w", width=16).grid(row=1, column=0, sticky="w", pady=6)
+        self._make_entry(gs_inner, self.json_key_path_var).grid(
+            row=1, column=1, sticky="ew", padx=(8, 8), pady=6, ipady=6)
+        self._make_btn(gs_inner, "📂 Pilih", self._browse_json_key, small=True).grid(row=1, column=2, pady=6)
 
         tk.Label(gs_inner,
-                 text="  ⓘ  PENTING: Pastikan email 'client_email' dari JSON sudah ditambah sebagai Editor di G-Sheets Anda!\n"
-                      "      Kosongkan kedua field di atas jika tidak menggunakan Google Sheets.",
+                 text="ⓘ  Pastikan email 'client_email' dari JSON sudah jadi Editor di G-Sheets Anda.\n"
+                      "    Kosongkan kedua field di atas jika tidak memakai Google Sheets.",
                  bg=PANEL_BG, fg=TEXT_DIM, justify="left",
                  font=("Segoe UI", 8, "italic")).grid(
-                 row=2, column=0, columnspan=3, sticky="w", pady=(2, 6))
+                 row=2, column=0, columnspan=3, sticky="w", pady=(4, 4))
 
-        # ── Mode Output (Radio) ─────────────────────────────────
-        mode_card = tk.Frame(outer, bg=PANEL_BG, bd=0, highlightthickness=1, highlightbackground=BORDER)
-        mode_card.pack(fill=tk.X, pady=(0, 8))
-        tk.Frame(mode_card, bg=ACCENT, height=2).pack(fill=tk.X)
-        mode_inner = tk.Frame(mode_card, bg=PANEL_BG, padx=16, pady=8)
-        mode_inner.pack(fill=tk.X)
+    # ----------------------------------------------------------
+    # Tab Proses — mode, tombol aksi, progress, LOG besar
+    # ----------------------------------------------------------
+    def _build_tab_proses(self, parent):
+        wrap = tk.Frame(parent, bg=DARK_BG, padx=4, pady=10)
+        wrap.pack(fill=tk.BOTH, expand=True)
 
-        tk.Label(mode_inner, text="📤  Mode Output :",
-                 bg=PANEL_BG, fg=ACCENT2, font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, padx=(0, 18))
+        # ── Baris atas: Mode + tombol aksi ────────────────────
+        top = tk.Frame(wrap, bg=PANEL_BG, bd=0, highlightthickness=1, highlightbackground=BORDER)
+        top.pack(fill=tk.X)
+        top_inner = tk.Frame(top, bg=PANEL_BG, padx=18, pady=12)
+        top_inner.pack(fill=tk.X)
 
-        def _make_radio(parent, text, val, desc):
-            f = tk.Frame(parent, bg=PANEL_BG)
-            f.pack(side=tk.LEFT, padx=(0, 24))
-            rb = tk.Radiobutton(
+        tk.Label(top_inner, text="📤  Mode Output",
+                 bg=PANEL_BG, fg=ACCENT2, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(0, 6))
+
+        radio_row = tk.Frame(top_inner, bg=PANEL_BG)
+        radio_row.pack(fill=tk.X)
+
+        def _make_radio(parent_, text, val, desc):
+            f = tk.Frame(parent_, bg=PANEL_BG)
+            f.pack(side=tk.LEFT, padx=(0, 28))
+            tk.Radiobutton(
                 f, text=text, variable=self.mode_var, value=val,
                 bg=PANEL_BG, fg=TEXT_MAIN, activebackground=PANEL_BG,
-                activeforeground=ACCENT2, selectcolor=DARK_BG,
-                font=("Segoe UI", 9, "bold"), relief="flat", cursor="hand2"
-            )
-            rb.pack(anchor="w")
+                activeforeground=ACCENT2, selectcolor="#ffffff",
+                font=("Segoe UI", 10, "bold"), relief="flat", cursor="hand2"
+            ).pack(anchor="w")
             tk.Label(f, text=desc, bg=PANEL_BG, fg=TEXT_DIM,
-                     font=("Segoe UI", 8, "italic")).pack(anchor="w", padx=(20, 0))
+                     font=("Segoe UI", 8, "italic")).pack(anchor="w", padx=(22, 0))
 
-        _make_radio(mode_inner,
-                    "⭐ Layout Masal (Default)", 1,
+        _make_radio(radio_row, "⭐ Layout Masal (Default)", 1,
                     "Semua file dalam 1 folder flat, tanpa subfolder")
-        _make_radio(mode_inner,
-                    "📂 Sortir per Resi", 2,
+        _make_radio(radio_row, "📂 Sortir per Resi", 2,
                     "File dikelompokkan dalam subfolder per nomor resi")
 
-        # ── Action buttons ────────────────────────────────────
-        btn_row = tk.Frame(outer, bg=DARK_BG)
-        btn_row.pack(fill=tk.X, pady=(0, 8))
+        # Tombol aksi
+        btn_row = tk.Frame(top_inner, bg=PANEL_BG)
+        btn_row.pack(fill=tk.X, pady=(14, 0))
 
         self.btn_start = self._make_btn(
             btn_row, "▶   Mulai Pemrosesan", self._start_thread,
-            color=BTN_GREEN, hover=BTN_GREEN_H, width=22, big=True
+            color=BTN_GREEN, hover=BTN_GREEN_H, fg="white", width=22, big=True
         )
         self.btn_start.pack(side=tk.LEFT, padx=(0, 10))
 
@@ -888,10 +942,8 @@ class SortirDesainApp:
         self.btn_folder.pack(side=tk.LEFT)
 
         # ── Progress ──────────────────────────────────────────
-        prog_card = tk.Frame(outer, bg=PANEL_BG, bd=0, highlightthickness=1, highlightbackground=BORDER)
-        prog_card.pack(fill=tk.X, pady=(0, 8))
-        prog_inner = tk.Frame(prog_card, bg=PANEL_BG, padx=16, pady=8)
-        prog_inner.pack(fill=tk.X)
+        prog_inner = tk.Frame(top_inner, bg=PANEL_BG)
+        prog_inner.pack(fill=tk.X, pady=(14, 0))
 
         self.lbl_status = tk.Label(
             prog_inner, text="⏸  Menunggu aksi pengguna...",
@@ -906,84 +958,91 @@ class SortirDesainApp:
         )
         self.progress_bar.pack(fill=tk.X)
 
-        # ── Log area (expand utama) ────────────────────────────
-        log_card = tk.Frame(outer, bg=PANEL_BG, bd=0, highlightthickness=1, highlightbackground=BORDER)
-        log_card.pack(fill=tk.BOTH, expand=True)
+        # ── Log area (expand utama — LOG besar) ────────────────
+        log_card = tk.Frame(wrap, bg=PANEL_BG, bd=0, highlightthickness=1, highlightbackground=BORDER)
+        log_card.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
 
-        # Header log dengan tombol hapus di sebelah kanan
-        log_header_row = tk.Frame(log_card, bg=PANEL_BG)
-        log_header_row.pack(fill=tk.X)
-        tk.Frame(log_header_row, bg=ACCENT, height=2).pack(fill=tk.X, side=tk.TOP)
-        log_title_bar = tk.Frame(log_header_row, bg=PANEL_BG)
+        log_title_bar = tk.Frame(log_card, bg=PANEL_BG)
         log_title_bar.pack(fill=tk.X)
         tk.Label(
             log_title_bar, text="🖥️  Log Proses",
             bg=PANEL_BG, fg=ACCENT2,
-            font=("Segoe UI", 10, "bold"),
-            padx=14, pady=7, anchor="w"
+            font=("Segoe UI", 11, "bold"),
+            padx=16, pady=9, anchor="w"
         ).pack(side=tk.LEFT)
         self._make_btn(log_title_bar, "🗑  Hapus Log", self._clear_log,
-                       color=BTN_GREY, hover=BTN_GREY_H, small=True).pack(side=tk.RIGHT, padx=12, pady=4)
+                       color=BTN_GREY, hover=BTN_GREY_H, small=True).pack(side=tk.RIGHT, padx=12, pady=6)
 
         log_inner = tk.Frame(log_card, bg=PANEL_BG)
         log_inner.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
 
-        self.log_notebook = ttk.Notebook(log_inner, style="Dark.TNotebook")
+        self.log_notebook = ttk.Notebook(log_inner, style="Sub.TNotebook")
         self.log_notebook.pack(fill=tk.BOTH, expand=True)
 
         tab_semua = tk.Frame(self.log_notebook, bg=LOG_BG)
         tab_gudang = tk.Frame(self.log_notebook, bg=LOG_BG)
-
         self.log_notebook.add(tab_semua, text="  🖥️ Semua Proses  ")
         self.log_notebook.add(tab_gudang, text="  📦 Log Gudang  ")
 
         self.text_log = scrolledtext.ScrolledText(
             tab_semua, state="disabled", wrap="word",
             bg=LOG_BG, fg=TEXT_MAIN,
-            font=("Consolas", 10),
-            relief="flat", bd=0, padx=12, pady=10,
-            selectbackground=ACCENT
+            font=("Consolas", 11),
+            relief="flat", bd=0, padx=14, pady=12,
+            selectbackground=ACCENT, selectforeground="white"
         )
         self.text_log.pack(fill=tk.BOTH, expand=True)
 
         self.text_log_gudang = scrolledtext.ScrolledText(
             tab_gudang, state="disabled", wrap="word",
             bg=LOG_BG, fg=TEXT_MAIN,
-            font=("Consolas", 10),
-            relief="flat", bd=0, padx=12, pady=10,
-            selectbackground=ACCENT
+            font=("Consolas", 11),
+            relief="flat", bd=0, padx=14, pady=12,
+            selectbackground=ACCENT, selectforeground="white"
         )
         self.text_log_gudang.pack(fill=tk.BOTH, expand=True)
 
         for txt_widget in (self.text_log, self.text_log_gudang):
-            txt_widget.tag_config("error",   foreground=COLOR_ERR,   font=("Consolas", 10, "bold"))
-            txt_widget.tag_config("success", foreground=COLOR_OK,    font=("Consolas", 10, "bold"))
-            txt_widget.tag_config("warn",    foreground=COLOR_WARN,  font=("Consolas", 10))
-            txt_widget.tag_config("header",  foreground=ACCENT2,     font=("Consolas", 10, "bold"))
-            txt_widget.tag_config("gudang",  foreground=COLOR_GUDANG, font=("Consolas", 10, "bold"))
+            txt_widget.tag_config("error",   foreground=COLOR_ERR,   font=("Consolas", 11, "bold"))
+            txt_widget.tag_config("success", foreground=COLOR_OK,    font=("Consolas", 11, "bold"))
+            txt_widget.tag_config("warn",    foreground=COLOR_WARN,  font=("Consolas", 11))
+            txt_widget.tag_config("header",  foreground=ACCENT2,     font=("Consolas", 11, "bold"))
+            txt_widget.tag_config("gudang",  foreground=COLOR_GUDANG, font=("Consolas", 11, "bold"))
 
     # ----------------------------------------------------------
     # Widget Helpers
     # ----------------------------------------------------------
-    def _card_header(self, parent, text):
-        h = tk.Frame(parent, bg=ACCENT, height=2)
-        h.pack(fill=tk.X)
+    def _make_card(self, parent, title):
+        """Card putih dengan judul accent. Return frame body untuk diisi caller."""
+        card = tk.Frame(parent, bg=PANEL_BG, bd=0, highlightthickness=1, highlightbackground=BORDER)
+        card.pack(fill=tk.X, pady=(0, 12))
         tk.Label(
-            parent, text=text,
+            card, text=title,
             bg=PANEL_BG, fg=ACCENT2,
-            font=("Segoe UI", 10, "bold"),
-            padx=14, pady=8, anchor="w"
+            font=("Segoe UI", 11, "bold"),
+            padx=16, pady=9, anchor="w"
         ).pack(fill=tk.X)
+        tk.Frame(card, bg=BORDER, height=1).pack(fill=tk.X)
+        return card
+
+    def _make_entry(self, parent, var):
+        """Entry bergaya light mode."""
+        return tk.Entry(
+            parent, textvariable=var, bg=INPUT_BG, fg=TEXT_MAIN,
+            insertbackground=TEXT_MAIN, relief="flat",
+            font=("Segoe UI", 10), bd=0, highlightthickness=1,
+            highlightbackground=BORDER, highlightcolor=ACCENT
+        )
 
     def _make_btn(self, parent, text, command, color=BTN_GREY, hover=BTN_GREY_H,
-                  width=None, small=False, big=False):
-        font = ("Segoe UI", 9, "bold") if not big else ("Segoe UI", 10, "bold")
-        pady = 3 if small else 7
+                  width=None, small=False, big=False, fg=TEXT_MAIN):
+        font = ("Segoe UI", 9, "bold") if not big else ("Segoe UI", 11, "bold")
+        pady = 3 if small else 8
         btn = tk.Button(
             parent, text=text, command=command,
-            bg=color, fg="white", activebackground=hover, activeforeground="white",
+            bg=color, fg=fg, activebackground=hover, activeforeground=fg,
             font=font, relief="flat", bd=0, cursor="hand2",
-            padx=10, pady=pady
+            padx=12, pady=pady
         )
         if width:
             btn.config(width=width)
@@ -1168,7 +1227,7 @@ class SortirDesainApp:
             'mode':            mode,
         })
 
-        self.btn_start.config(state="disabled", bg="#555570")
+        self.btn_start.config(state="disabled", bg="#9ca3af")
         self._clear_log()
         self.progress_var.set(0)
         self.lbl_status.config(text="⏳  Memulai...", fg=ACCENT2)

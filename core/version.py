@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import subprocess
 
-VERSION_BASE = "7.1"
+VERSION_BASE = "8.0"
 
 
 def _repo_root() -> str:
