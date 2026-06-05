@@ -25,8 +25,8 @@ def _siapkan_master(folder, sku_files):
             f.write('dummy cdr')
 
 
-def jalankan(nama_kasus, df_pesanan, mock_stok, master_files):
-    """Jalankan proses_data 1x dan kembalikan (log_lines, copied_files)."""
+def jalankan(nama_kasus, df_pesanan, mock_stok, master_files, tulis_log_keluar=False):
+    """Jalankan proses_data 1x dan kembalikan (log_lines, copied_files, log_keluar_dipanggil)."""
     tmp = tempfile.mkdtemp(prefix='ganci_test_')
     folder_master = os.path.join(tmp, 'master')
     folder_output = os.path.join(tmp, 'output')
@@ -44,6 +44,16 @@ def jalankan(nama_kasus, df_pesanan, mock_stok, master_files):
 
     # Monkeypatch loader stok → kembalikan mock (hindari Google Sheets).
     sortir_desain.load_stok_database = lambda *a, **k: dict(mock_stok)
+
+    # Monkeypatch penulis LOG_KELUAR → rekam apakah dipanggil (hindari Sheets).
+    dipanggil = {'log_keluar': False}
+
+    def fake_log_keluar(*a, **k):
+        dipanggil['log_keluar'] = True
+
+    sortir_desain.log_keluar_gudang = fake_log_keluar
+    # sync_to_google_sheets juga butuh Sheets → nonaktifkan agar test offline.
+    sortir_desain.sync_to_google_sheets = lambda *a, **k: True
 
     log_lines = []
     proses_selesai = {}
@@ -69,13 +79,14 @@ def jalankan(nama_kasus, df_pesanan, mock_stok, master_files):
         json_key_path='DUMMY',
         mode=1,
         cek_stok_aktif=True,
+        tulis_log_keluar=tulis_log_keluar,
     )
 
     # Kumpulkan file .cdr yg benar-benar disalin ke output (mode 1 = flat).
     out_dir = os.path.join(folder_output, [d for d in os.listdir(folder_output) if 'LAYOUT_MASAL' in d][0])
     copied = sorted(f for f in os.listdir(out_dir) if f.lower().endswith('.cdr'))
 
-    return log_lines, copied
+    return log_lines, copied, dipanggil['log_keluar']
 
 
 def main():
@@ -94,7 +105,7 @@ def main():
     }
     df_pes = pd.DataFrame([{'resi': 'RESI-A', 'sku': 'GK-ATM-SET-481-485-M', 'jumlah': 1}])
     master = [f'GK-ATM-000048{n}-M.cdr' for n in range(1, 6)]  # 481..485
-    log, copied = jalankan('bundle-ready', df_pes, mock_stok, master)
+    log, copied, _ = jalankan('bundle-ready', df_pes, mock_stok, master)
 
     print('=' * 60)
     print('KASUS 1 — Bundle M, 1 set ready di gudang (481M=4)')
@@ -114,7 +125,7 @@ def main():
     mock_stok2 = {
         '481M': {'stok': 0, 'nama_produk': 'X', 'sku_asli': 'GK-ATM-0000481-M', 'sku_pendek': '481M'}
     }
-    log2, copied2 = jalankan('bundle-habis', df_pes, mock_stok2, master)
+    log2, copied2, _ = jalankan('bundle-habis', df_pes, mock_stok2, master)
     print()
     print('=' * 60)
     print('KASUS 2 — Bundle M, stok set habis (481M=0)')
@@ -131,7 +142,7 @@ def main():
     }
     df_pes3 = pd.DataFrame([{'resi': 'RESI-C', 'sku': 'GK-ATM-0000500-L', 'jumlah': 1}])
     master3 = ['GK-ATM-0000500-L.cdr']
-    log3, copied3 = jalankan('single-L', df_pes3, mock_stok3, master3)
+    log3, copied3, _ = jalankan('single-L', df_pes3, mock_stok3, master3)
     print()
     print('=' * 60)
     print('KASUS 3 — Item tunggal L, stok ready (500L=3)')
@@ -143,6 +154,23 @@ def main():
         print('  ✅ LULUS: item tunggal tetap per-SKU seperti semula')
     else:
         print('  ❌ GAGAL: perilaku item tunggal berubah'); gagal += 1
+
+    # ── KASUS 4: Toggle "Tulis di Log Keluar" ──────────────────────────
+    # Default (False) → LOG_KELUAR TIDAK ditulis. True → ditulis.
+    print()
+    print('=' * 60)
+    print('KASUS 4 — Toggle Tulis di Log Keluar (bundle ready)')
+    print('=' * 60)
+    log_off, _, dipanggil_off = jalankan('toggle-off', df_pes, mock_stok, master, tulis_log_keluar=False)
+    log_on, _, dipanggil_on = jalankan('toggle-on', df_pes, mock_stok, master, tulis_log_keluar=True)
+    ada_pesan_skip = any('Dilewati' in l for l in log_off)
+    print(f'  Default OFF → log_keluar dipanggil: {dipanggil_off}  (harus False)')
+    print(f'  Default OFF → ada pesan "Dilewati" : {ada_pesan_skip}  (harus True)')
+    print(f'  Centang ON  → log_keluar dipanggil : {dipanggil_on}  (harus True)')
+    if (not dipanggil_off) and ada_pesan_skip and dipanggil_on:
+        print('  ✅ LULUS: toggle mengontrol penulisan LOG_KELUAR dgn benar')
+    else:
+        print('  ❌ GAGAL: toggle tidak berfungsi sesuai harapan'); gagal += 1
 
     print()
     print('=' * 60)

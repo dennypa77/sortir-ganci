@@ -331,7 +331,8 @@ def proses_data(file_pesanan, file_database, folder_master_desain, folder_output
                 log_callback, progress_callback, finish_callback,
                 status_callback=None, cloud_warn_callback=None,
                 spreadsheet_id='', json_key_path='', mode=1,
-                cek_stok_aktif=True, gudang_log_callback=None):
+                cek_stok_aktif=True, gudang_log_callback=None,
+                tulis_log_keluar=False):
     """
     mode=1 : Layout Masal — semua file dalam 1 folder flat, tidak ada subfolder bundle.
     mode=2 : Sortir per Resi — file dikelompokkan dalam subfolder per nomor resi.
@@ -705,12 +706,19 @@ def proses_data(file_pesanan, file_database, folder_master_desain, folder_output
     log_callback("═" * 55)
     log_callback("\n✅  SEMUA PESANAN TELAH SELESAI DIPROSES ✅", tag="success")
 
-    # ── Catat log gudang ke LOG_KELUAR ──────────────────────────
+    # ── Catat log gudang ke LOG_KELUAR (opsional via toggle) ────
     if ambil_gudang_log:
-        set_status("📝  Mencatat log pengambilan gudang...")
-        log_keluar_gudang(
-            spreadsheet_id, json_key_path, ambil_gudang_log, log_callback
-        )
+        if tulis_log_keluar:
+            set_status("📝  Mencatat log pengambilan gudang...")
+            log_keluar_gudang(
+                spreadsheet_id, json_key_path, ambil_gudang_log, log_callback
+            )
+        else:
+            log_callback(
+                f"\n⏭️  [LOG_KELUAR] Dilewati — opsi 'Tulis di Log Keluar' tidak aktif. "
+                f"{len(ambil_gudang_log)} pengambilan gudang TIDAK dicatat (stok sheet tidak dikurangi).",
+                tag="warn"
+            )
 
     # ── Sync ke Google Sheets (setelah semua file & log Excel selesai) ──────
     sync_ok = sync_to_google_sheets(
@@ -764,6 +772,8 @@ class SortirDesainApp:
         self.spreadsheet_id_var       = tk.StringVar(value=cfg.get('spreadsheet_id', ''))
         self.json_key_path_var        = tk.StringVar(value=cfg.get('json_key_path', ''))
         self.mode_var                 = tk.IntVar(value=cfg.get('mode', 1))
+        # Toggle "Tulis di Log Keluar" — default OFF tiap sesi (tidak dipersist).
+        self.tulis_log_keluar_var     = tk.BooleanVar(value=False)
 
         self._build_ui()
         # Tampilkan notifikasi update setelah mainloop sempat render UI dasar.
@@ -940,6 +950,16 @@ class SortirDesainApp:
             color=BTN_GREY, hover=BTN_GREY_H, width=22, big=True
         )
         self.btn_folder.pack(side=tk.LEFT)
+
+        # Toggle: tulis pengambilan gudang ke LOG_KELUAR (kurangi stok sheet)
+        tk.Checkbutton(
+            btn_row, text="  📝 Tulis di Log Keluar (kurangi stok)",
+            variable=self.tulis_log_keluar_var,
+            bg=PANEL_BG, fg=TEXT_MAIN, activebackground=PANEL_BG,
+            activeforeground=ACCENT2, selectcolor="#ffffff",
+            font=("Segoe UI", 9, "bold"), relief="flat", cursor="hand2",
+            anchor="w"
+        ).pack(side=tk.LEFT, padx=(16, 0))
 
         # ── Progress ──────────────────────────────────────────
         prog_inner = tk.Frame(top_inner, bg=PANEL_BG)
@@ -1237,7 +1257,8 @@ class SortirDesainApp:
             args=(file_pes, file_db, folder_master, folder_output,
                   self.log_message, self.update_progress, self.process_finished,
                   self.update_status, self.show_cloud_warning,
-                  spreadsheet_id, json_key_path, mode, True, self.log_gudang_message)
+                  spreadsheet_id, json_key_path, mode, True, self.log_gudang_message,
+                  self.tulis_log_keluar_var.get())
         )
         t.daemon = True
         t.start()
