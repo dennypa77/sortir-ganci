@@ -366,7 +366,25 @@ def proses_data(file_pesanan, file_database, folder_master_desain, folder_output
 
     set_status("📂  Menyiapkan folder output...")
     log_callback("📂 Membuat folder output baru...")
-    os.makedirs(path_output_utama, exist_ok=True)
+    drive_output = os.path.splitdrive(os.path.abspath(path_output_utama))[0]
+    if drive_output and not os.path.exists(drive_output + os.sep):
+        log_callback(
+            f"❌ ERROR: Drive '{drive_output}' tidak ditemukan / tidak terhubung.\n"
+            f"   Periksa Folder Output di pengaturan — drive mungkin belum di-mount "
+            f"(mis. Google Drive offline) atau path tidak valid:\n   {path_output_utama}",
+            tag="error"
+        )
+        finish_callback(False)
+        return
+    try:
+        os.makedirs(path_output_utama, exist_ok=True)
+    except OSError as e:
+        log_callback(
+            f"❌ ERROR membuat folder output: {e}\n   {path_output_utama}",
+            tag="error"
+        )
+        finish_callback(False)
+        return
     log_callback(f"✅ Folder output siap.")
 
     log_data = []
