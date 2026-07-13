@@ -90,6 +90,95 @@ def to_ultra_short_sku(sku_str: str) -> str:
     return f"{angka}{ukuran}"
 
 
+_EXPAND_SHORT_RE = re.compile(r'^(?:GK-)?(?:([A-Z]+)-)?0*(\d+)-?(L|S|M|BS)$', re.IGNORECASE)
+
+
+def expand_short_sku(short_sku: str, default_prefix: str = 'ATM') -> Optional[str]:
+    """
+    KEBALIKAN `to_ultra_short_sku`: SKU PENDEK charm satuan → SKU PANJANG kanonik
+    `GK-<PREFIX>-<7digit>-<ukuran>`. Dipakai untuk fitur Print Kekurangan (operator
+    mengetik SKU pendek, sistem menampilkan SKU panjangnya & menarik file .cdr).
+
+    Menerima:
+      491L                 -> GK-ATM-0000491-L
+      5521M                -> GK-ATM-0005521-M
+      1961BS / 1961-bs     -> GK-ATM-0001961-BS
+      ATM-491-L            -> GK-ATM-0000491-L   (prefix eksplisit dipakai)
+      GK-ATM-0000491-L     -> GK-ATM-0000491-L   (dinormalkan)
+    Return None kalau bukan pola charm satuan yang dikenali.
+
+    Catatan: hanya menghasilkan SATU SKU charm satuan (bukan expand bundle),
+    karena print kekurangan menarik desain individual per input.
+    """
+    s = str(short_sku).strip().upper()
+    if not s:
+        return None
+    m = _EXPAND_SHORT_RE.match(s)
+    if not m:
+        return None
+    prefix = (m.group(1) or default_prefix).upper()
+    angka = m.group(2).zfill(7)
+    ukuran = m.group(3).upper()
+    return f"GK-{prefix}-{angka}-{ukuran}"
+
+
+@dataclass
+class ShortKekResolution:
+    """
+    Hasil resolusi SKU pendek untuk fitur Print Kekurangan.
+
+    - `sku_display`: label yang ditampilkan ke operator. Untuk L = SKU satuan
+      (`GK-ATM-0011545-L`); untuk M/S/BS = SKU BUNDLE/SET
+      (`GK-ATM-SET-1026-1030-M`).
+    - `member_bases`: daftar SKU dasar (tanpa suffix ukuran) yang file .cdr-nya
+      perlu ditarik. L = 1 desain; bundle M/S = 5 desain; BS = 10 desain.
+      File dicari sebagai `f"{base}-{ukuran}.cdr"`.
+    """
+    ok: bool
+    short: str = ''
+    ukuran: str = ''
+    is_bundle: bool = False
+    prefix: str = 'ATM'
+    sku_display: str = ''
+    member_bases: List[str] = field(default_factory=list)
+
+
+def resolve_short_kekurangan(short_sku: str, default_prefix: str = 'ATM') -> ShortKekResolution:
+    """
+    SKU pendek → resolusi Print Kekurangan (satuan L atau BUNDLE M/S/BS).
+
+    Konvensi (kebalikan `to_ultra_short_sku`):
+      `11545L` → satuan  `GK-ATM-0011545-L`         (1 desain)
+      `1026M`  → bundle  `GK-ATM-SET-1026-1030-M`   (5 desain: 1026..1030)
+      `9251BS` → bundle  `GK-ATM-SET-9251-9260-BS`  (10 desain: 9251..9260)
+      `ANM-1026-M` / prefix eksplisit → prefix dipakai.
+
+    Angka pendek = awal range bundle; panjang range = ATURAN_BUNDLE (S/M=5, BS=10).
+    Return `ShortKekResolution(ok=False)` bila pola tak dikenali.
+    """
+    s = str(short_sku).strip().upper()
+    m = _EXPAND_SHORT_RE.match(s)
+    if not m:
+        return ShortKekResolution(ok=False, short=s)
+    prefix = (m.group(1) or default_prefix).upper()
+    start = int(m.group(2))
+    ukuran = m.group(3).upper()
+
+    if ukuran == 'L':
+        base = f"GK-{prefix}-{str(start).zfill(7)}"
+        return ShortKekResolution(
+            ok=True, short=s, ukuran=ukuran, is_bundle=False, prefix=prefix,
+            sku_display=f"{base}-L", member_bases=[base])
+
+    # M/S/BS = bundle. Angka pendek = awal range; panjang = ATURAN_BUNDLE.
+    size = ATURAN_BUNDLE.get(ukuran, 5)
+    end = start + size - 1
+    members = [f"GK-{prefix}-{str(i).zfill(7)}" for i in range(start, end + 1)]
+    return ShortKekResolution(
+        ok=True, short=s, ukuran=ukuran, is_bundle=True, prefix=prefix,
+        sku_display=f"GK-{prefix}-SET-{start}-{end}-{ukuran}", member_bases=members)
+
+
 def pad_sku_unit(sku_pesanan: str) -> str:
     """
     Pad angka jadi 7 digit HANYA untuk SKU tunggal ber-suffix `-L/-S/-M/-BS`.

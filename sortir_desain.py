@@ -16,6 +16,8 @@ from core.sku_utils import (
     parse_dynamic_sku,
     normalize_sku,
     to_ultra_short_sku,
+    expand_short_sku,
+    resolve_short_kekurangan,
     pad_sku_unit,
     resolve_bundle,
 )
@@ -862,11 +864,14 @@ class SortirDesainApp:
 
         tab_setting = tk.Frame(main_nb, bg=DARK_BG)
         tab_proses  = tk.Frame(main_nb, bg=DARK_BG)
+        tab_kekurangan = tk.Frame(main_nb, bg=DARK_BG)
         main_nb.add(tab_setting, text="  ⚙️  Pengaturan  ")
         main_nb.add(tab_proses,  text="  ▶  Proses  ")
+        main_nb.add(tab_kekurangan, text="  ➕  Print Kekurangan  ")
 
         self._build_tab_setting(tab_setting)
         self._build_tab_proses(tab_proses)
+        self._build_tab_kekurangan(tab_kekurangan)
 
     # ----------------------------------------------------------
     # Tab Pengaturan — file/folder + integrasi Google Sheets
@@ -1046,6 +1051,298 @@ class SortirDesainApp:
             txt_widget.tag_config("warn",    foreground=COLOR_WARN,  font=("Consolas", 11))
             txt_widget.tag_config("header",  foreground=ACCENT2,     font=("Consolas", 11, "bold"))
             txt_widget.tag_config("gudang",  foreground=COLOR_GUDANG, font=("Consolas", 11, "bold"))
+
+    # ----------------------------------------------------------
+    # Tab Print Kekurangan — input SKU pendek → tarik desain .cdr
+    # ----------------------------------------------------------
+    def _build_tab_kekurangan(self, parent):
+        wrap = tk.Frame(parent, bg=DARK_BG, padx=4, pady=10)
+        wrap.pack(fill=tk.BOTH, expand=True)
+
+        # ── Card: input SKU ───────────────────────────────────
+        card_in = self._make_card(wrap, "➕  Input SKU Kekurangan")
+        inner = tk.Frame(card_in, bg=PANEL_BG, padx=18, pady=12)
+        inner.pack(fill=tk.X)
+
+        tk.Label(
+            inner,
+            text="Ketik SKU pendek (mis. 491L) lalu Enter / Tambah — sistem tampilkan SKU panjangnya.",
+            bg=PANEL_BG, fg=TEXT_DIM, font=("Segoe UI", 9), anchor="w"
+        ).pack(fill=tk.X, pady=(0, 8))
+
+        row = tk.Frame(inner, bg=PANEL_BG)
+        row.pack(fill=tk.X)
+        self.kk_sku_var = tk.StringVar()
+        self.kk_qty_var = tk.StringVar(value="1")
+        e_sku = self._make_entry(row, self.kk_sku_var)
+        e_sku.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=7)
+        e_sku.bind("<Return>", lambda ev: self._kk_add())
+        self.kk_sku_entry = e_sku
+        tk.Label(row, text="Qty", bg=PANEL_BG, fg=TEXT_DIM,
+                 font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(10, 4))
+        e_qty = tk.Entry(row, textvariable=self.kk_qty_var, width=5, bg=INPUT_BG, fg=TEXT_MAIN,
+                         relief="flat", font=("Segoe UI", 10), bd=0, highlightthickness=1,
+                         highlightbackground=BORDER, highlightcolor=ACCENT, justify="center")
+        e_qty.pack(side=tk.LEFT, ipady=7)
+        e_qty.bind("<Return>", lambda ev: self._kk_add())
+        self._make_btn(row, "➕ Tambah", self._kk_add,
+                       color=BTN_GREEN, hover=BTN_GREEN_H, fg="white").pack(side=tk.LEFT, padx=(10, 0))
+
+        self.kk_feedback = tk.Label(inner, text="", bg=PANEL_BG, fg=ACCENT2,
+                                    font=("Consolas", 10, "bold"), anchor="w")
+        self.kk_feedback.pack(fill=tk.X, pady=(8, 0))
+
+        # ── Card: daftar ──────────────────────────────────────
+        card_list = self._make_card(wrap, "📋  Daftar SKU akan di-print")
+        list_inner = tk.Frame(card_list, bg=PANEL_BG, padx=12, pady=12)
+        list_inner.pack(fill=tk.BOTH, expand=True)
+
+        cols = ("no", "pendek", "panjang", "qty", "status")
+        self.kk_tree = ttk.Treeview(list_inner, columns=cols, show="headings", height=8)
+        headers = {
+            "no": ("No", 40), "pendek": ("SKU Pendek", 110), "panjang": ("SKU Panjang", 230),
+            "qty": ("Qty", 50), "status": ("Status", 150),
+        }
+        for c, (txt, w) in headers.items():
+            self.kk_tree.heading(c, text=txt)
+            self.kk_tree.column(c, width=w, anchor=("center" if c in ("no", "qty") else "w"))
+        self.kk_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        sb = ttk.Scrollbar(list_inner, orient="vertical", command=self.kk_tree.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.kk_tree.configure(yscrollcommand=sb.set)
+
+        btns = tk.Frame(card_list, bg=PANEL_BG)
+        btns.pack(fill=tk.X, padx=12, pady=(0, 12))
+        self._make_btn(btns, "🗑 Hapus Baris", self._kk_remove_selected, small=True).pack(side=tk.LEFT)
+        self._make_btn(btns, "🧹 Kosongkan Daftar", self._kk_clear, small=True).pack(side=tk.LEFT, padx=8)
+        self.kk_count_label = tk.Label(btns, text="0 SKU", bg=PANEL_BG, fg=TEXT_DIM,
+                                       font=("Segoe UI", 9))
+        self.kk_count_label.pack(side=tk.RIGHT)
+
+        # ── Eksekusi ──────────────────────────────────────────
+        exec_bar = tk.Frame(wrap, bg=DARK_BG, pady=6)
+        exec_bar.pack(fill=tk.X)
+        self.kk_exec_btn = self._make_btn(
+            exec_bar, "▶  EKSEKUSI — Tarik Desain", self._kk_execute,
+            color=BTN_GREEN, hover=BTN_GREEN_H, fg="white", big=True, width=28
+        )
+        self.kk_exec_btn.pack(side=tk.LEFT)
+        tk.Label(exec_bar, text="→ folder [Output]/PRINT_KEKURANGAN (isi lama dihapus tiap eksekusi)",
+                 bg=DARK_BG, fg=TEXT_DIM, font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=12)
+
+        # ── Log ───────────────────────────────────────────────
+        log_card = self._make_card(wrap, "🖥️  Log")
+        li = tk.Frame(log_card, bg=PANEL_BG)
+        li.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        self.kk_log = scrolledtext.ScrolledText(
+            li, state="disabled", wrap="word", bg=LOG_BG, fg=TEXT_MAIN,
+            font=("Consolas", 10), relief="flat", bd=0, padx=12, pady=10, height=7
+        )
+        self.kk_log.pack(fill=tk.BOTH, expand=True)
+        self.kk_log.tag_config("error",   foreground=COLOR_ERR,  font=("Consolas", 10, "bold"))
+        self.kk_log.tag_config("success", foreground=COLOR_OK,   font=("Consolas", 10, "bold"))
+        self.kk_log.tag_config("warn",    foreground=COLOR_WARN, font=("Consolas", 10))
+        self.kk_log.tag_config("header",  foreground=ACCENT2,    font=("Consolas", 10, "bold"))
+        self._kk_seq = 0
+        self._kk_index = None          # cache index file master
+        self._kk_index_folder = None   # folder yang di-index (deteksi perubahan)
+
+    def _kk_ensure_index(self, rebuild=False):
+        """Bangun/cache index file master. Return dict atau None (folder invalid)."""
+        folder = self.folder_master_desain_path.get().strip()
+        if not folder or not os.path.isdir(folder):
+            return None
+        if not rebuild and self._kk_index is not None and self._kk_index_folder == folder:
+            return self._kk_index
+        self.kk_feedback.config(text="🔍 Mengindeks folder master…", fg=ACCENT2)
+        self.root.update_idletasks()
+        self._kk_index = build_file_index(folder, lambda *a, **k: None)
+        self._kk_index_folder = folder
+        return self._kk_index
+
+    def _kk_scan_members(self, res, index):
+        """Hitung member yang ada di master + prefix asli file. → (found, total, actual_prefix)."""
+        found = 0
+        actual_prefix = None
+        for base in res.member_bases:
+            path = index.get(f"{base}-{res.ukuran}.cdr")
+            if path:
+                found += 1
+                if actual_prefix is None:
+                    bn = os.path.basename(path).upper()
+                    if 'GK-ANM-' in bn:
+                        actual_prefix = 'ANM'
+                    elif 'GK-ATM-' in bn:
+                        actual_prefix = 'ATM'
+        return found, len(res.member_bases), actual_prefix
+
+    def _kk_log(self, msg, tag=None):
+        def _do():
+            self.kk_log.config(state="normal")
+            self.kk_log.insert("end", msg + "\n", tag or "")
+            self.kk_log.see("end")
+            self.kk_log.config(state="disabled")
+        self.root.after(0, _do)
+
+    def _kk_update_count(self):
+        self.kk_count_label.config(text=f"{len(self.kk_tree.get_children())} SKU")
+
+    def _kk_add(self):
+        raw = self.kk_sku_var.get().strip()
+        if not raw:
+            return
+        try:
+            qty = max(1, int((self.kk_qty_var.get() or "1").strip()))
+        except ValueError:
+            qty = 1
+
+        res = resolve_short_kekurangan(raw)
+        if not res.ok:
+            self.kk_feedback.config(
+                text=f"✗ '{raw}' tidak dikenali (contoh: 491L, 1026M, 9251BS).", fg=COLOR_ERR)
+            return
+
+        # Cek keberadaan file di master (kalau folder sudah di-set).
+        index = self._kk_ensure_index()
+        display = res.sku_display
+        if index is None:
+            status = "— belum dicek"
+            self.kk_feedback.config(
+                text=f"• {raw.upper()} → {display}  (set Folder Master utk cek keberadaan)", fg=ACCENT2)
+        else:
+            found, total, actual_prefix = self._kk_scan_members(res, index)
+            # Prefix asli file beda (mis. resolve ATM tapi file ANM) → pakai yang asli.
+            if actual_prefix and actual_prefix != res.prefix:
+                res = resolve_short_kekurangan(raw, default_prefix=actual_prefix)
+                display = res.sku_display
+                found, total, _ = self._kk_scan_members(res, index)
+            if found == 0:
+                status = "✗ Tidak ditemukan"
+                self.kk_feedback.config(
+                    text=f"✗ {raw.upper()} → {display}  — file .cdr TIDAK ADA di master.", fg=COLOR_ERR)
+            elif found == total:
+                status = f"✓ Ada ({total} desain)"
+                self.kk_feedback.config(
+                    text=f"✓ {raw.upper()} → {display}  ({total} desain siap).", fg=COLOR_OK)
+            else:
+                status = f"⚠ {found}/{total} ada"
+                self.kk_feedback.config(
+                    text=f"⚠ {raw.upper()} → {display}  — {found}/{total} desain ada, {total - found} hilang.",
+                    fg=COLOR_WARN)
+
+        self._kk_seq += 1
+        self.kk_tree.insert("", "end", values=(self._kk_seq, raw.upper(), display, qty, status))
+        self.kk_sku_var.set("")
+        self.kk_qty_var.set("1")
+        self._kk_update_count()
+        self.kk_sku_entry.focus_set()
+
+    def _kk_remove_selected(self):
+        for iid in self.kk_tree.selection():
+            self.kk_tree.delete(iid)
+        self._kk_update_count()
+
+    def _kk_clear(self):
+        for iid in self.kk_tree.get_children():
+            self.kk_tree.delete(iid)
+        self._kk_update_count()
+
+    def _kk_execute(self):
+        rows = self.kk_tree.get_children()
+        if not rows:
+            messagebox.showwarning("Kosong", "Belum ada SKU. Tambahkan dulu.")
+            return
+        folder_master = self.folder_master_desain_path.get().strip()
+        folder_output = self.folder_output_path.get().strip()
+        if not folder_master or not os.path.isdir(folder_master):
+            messagebox.showerror("Folder Master",
+                                 "Folder Master Desain belum di-set / tidak ada (tab Pengaturan).")
+            return
+        if not folder_output or not os.path.isdir(folder_output):
+            messagebox.showerror("Folder Output",
+                                 "Folder Output belum di-set / tidak ada (tab Pengaturan).")
+            return
+        items = [(iid, self.kk_tree.item(iid, "values")) for iid in rows]
+        self.kk_exec_btn.config(state="disabled", text="⏳ Memproses…")
+        threading.Thread(target=self._kk_execute_worker,
+                         args=(items, folder_master, folder_output), daemon=True).start()
+
+    def _kk_execute_worker(self, items, folder_master, folder_output):
+        try:
+            out_dir = os.path.join(folder_output, "PRINT_KEKURANGAN")
+            self._kk_log("=" * 52, "header")
+            self._kk_log("▶  EKSEKUSI PRINT KEKURANGAN", "header")
+            # Hapus isi folder sebelumnya (tiap eksekusi bersih).
+            shutil.rmtree(out_dir, ignore_errors=True)
+            os.makedirs(out_dir, exist_ok=True)
+            self._kk_log(f"🧹 Folder dibersihkan: {out_dir}")
+            self._kk_log("🔍 Mengindeks folder master…")
+            index = build_file_index(folder_master, lambda *a, **k: None)
+            self._kk_log(f"✅ Index siap: {len(index):,} entri.")
+
+            ok = partial = miss = total_copy = 0
+            counter = defaultdict(int)
+            for iid, vals in items:
+                pendek, display, qty = vals[1], vals[2], int(vals[3])
+                res = resolve_short_kekurangan(pendek)
+                if not res.ok:
+                    miss += 1
+                    self.root.after(0, lambda i=iid: self.kk_tree.set(i, "status", "✗ invalid"))
+                    continue
+
+                # Kumpulkan file member yang ada (bundle → banyak desain; L → 1).
+                found_files = []  # (real_name, path)
+                for base in res.member_bases:
+                    path = index.get(f"{base}-{res.ukuran}.cdr")
+                    if path:
+                        found_files.append((os.path.basename(path), path))
+                total_member = len(res.member_bases)
+
+                if not found_files:
+                    miss += 1
+                    self.root.after(0, lambda i=iid: self.kk_tree.set(i, "status", "✗ tidak ada"))
+                    self._kk_log(f"  ❌ {pendek} ({display}) — tak ada file .cdr di master.", "error")
+                    continue
+
+                copied = 0
+                for _ in range(qty):
+                    for real_name, path in found_files:
+                        stem, ext = os.path.splitext(real_name)
+                        counter[real_name] += 1
+                        n = counter[real_name]
+                        nama = real_name if n == 1 else f"{stem}_{n}{ext}"
+                        try:
+                            shutil.copy(path, os.path.join(out_dir, nama))
+                            copied += 1
+                            total_copy += 1
+                        except Exception as e:
+                            self._kk_log(f"  ❌ {real_name}: gagal copy — {e}", "error")
+
+                if len(found_files) < total_member:
+                    partial += 1
+                    st = f"⚠ {len(found_files)}/{total_member} → {copied} file"
+                    self.root.after(0, lambda i=iid, s=st: self.kk_tree.set(i, "status", s))
+                    self._kk_log(
+                        f"  ⚠ {pendek} ({display}) — {len(found_files)}/{total_member} desain ada → {copied} file.",
+                        "warn")
+                else:
+                    ok += 1
+                    self.root.after(0, lambda i=iid, c=copied: self.kk_tree.set(i, "status", f"✓ {c} file"))
+                    self._kk_log(f"  ✅ {pendek} ({display}) — {copied} file.", "success")
+
+            self._kk_log("-" * 52)
+            summary = f"SELESAI. {ok} OK, {partial} sebagian, {miss} tidak ada. Total {total_copy} file .cdr → {out_dir}"
+            self._kk_log(summary, "success" if (miss == 0 and partial == 0) else "warn")
+            if total_copy > 0:
+                try:
+                    os.startfile(out_dir)  # buka folder hasil (Windows)
+                except Exception:
+                    pass
+        except Exception as e:
+            self._kk_log(f"FATAL: {e}", "error")
+        finally:
+            self.root.after(0, lambda: self.kk_exec_btn.config(
+                state="normal", text="▶  EKSEKUSI — Tarik Desain"))
 
     # ----------------------------------------------------------
     # Widget Helpers
